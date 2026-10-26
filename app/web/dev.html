@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kadans panel dev</title>
+<!-- Dev page only: shows panel.html in a 320 px frame with invented fixtures. ?f=<fixture>&theme=light|dark&shot=1 -->
+<style>
+:root { --desk: #f2f3f6; --text: #1d1d1f; --muted: #737378; --btn: #ffffff; --line: rgba(0,0,0,.08); color-scheme: light; }
+:root[data-theme="dark"] { --desk: #19191c; --text: #f2f2f4; --muted: #9a9aa0; --btn: #2a2a2e; --line: rgba(255,255,255,.08); color-scheme: dark; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --desk: #19191c; --text: #f2f2f4; --muted: #9a9aa0; --btn: #2a2a2e; --line: rgba(255,255,255,.08); color-scheme: dark; }
+}
+* { box-sizing: border-box; margin: 0; }
+body { font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; background: var(--desk); color: var(--text); padding: 20px 16px; }
+.bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; max-width: 640px; }
+.bar button { font: inherit; color: inherit; background: var(--btn); border: .5px solid var(--line); border-radius: 999px; padding: 4px 10px; }
+.bar button[aria-pressed="true"] { font-weight: 600; }
+.frame { width: 320px; border-radius: 22px; box-shadow: 0 0 0 .5px var(--line), 0 12px 40px rgba(20,20,40,.12); }
+iframe { display: block; width: 320px; height: 200px; border: 0; border-radius: 22px; background: transparent; }
+#log { margin-top: 12px; font: 11.5px ui-monospace, Menlo, monospace; color: var(--muted); white-space: pre-wrap; max-width: 640px; }
+body.shot { padding: 16px; }
+body.shot .bar, body.shot #log { display: none; }
+</style>
+<script src="fixtures/_base.js"></script>
+<script src="fixtures/brake.js"></script>
+<script src="fixtures/cruise.js"></script>
+<script src="fixtures/gas.js"></script>
+<script src="fixtures/no_data.js"></script>
+<script src="fixtures/many.js"></script>
+<script src="fixtures/long.js"></script>
+<script src="fixtures/settings.js"></script>
+<script src="fixtures/hostile.js"></script>
+</head>
+<body>
+<div class="bar" id="bar"></div>
+<div class="frame"><iframe id="f" src="panel.html" title="Kadans panel"></iframe></div>
+<div id="log"></div>
+<script>
+(function () {
+  const q = new URLSearchParams(location.search);
+  const FIX = window.KADANS_FIXTURES;
+  const f = document.getElementById('f');
+  const bar = document.getElementById('bar');
+  const log = document.getElementById('log');
+  let current = FIX[q.get('f')] ? q.get('f') : 'brake';
+  let theme = q.get('theme') === 'dark' || q.get('theme') === 'light' ? q.get('theme') : '';
+  if (q.get('shot')) document.body.classList.add('shot');
+
+  function applyTheme() {
+    for (const r of [document.documentElement, f.contentDocument.documentElement]) {
+      if (theme) r.dataset.theme = theme; else delete r.dataset.theme;
+    }
+  }
+  function fit() {
+    const p = f.contentDocument.querySelector('.panel');
+    if (p) f.style.height = `${Math.ceil(p.getBoundingClientRect().height)}px`;
+  }
+  function show(name) {
+    current = name;
+    applyTheme();
+    f.contentWindow.kadans.reset?.();
+    f.contentWindow.kadans.render(FIX[name]);
+    if (typeof FIX[name].after === 'function') FIX[name].after(f.contentDocument); // fixtures that open a menu or group
+    fit();
+    drawBar();
+  }
+  function drawBar() {
+    bar.innerHTML = Object.keys(FIX).map((k) => `<button data-f="${k}" aria-pressed="${k === current}">${k}</button>`).join('') +
+      `<button data-t="1">theme: ${theme || 'system'}</button>`;
+  }
+  bar.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.t) theme = theme === '' ? 'light' : theme === 'light' ? 'dark' : '';
+    show(b.dataset.f || current);
+  });
+  f.addEventListener('load', () => {
+    // Stand-in for the WKWebView message handler: show what the panel sends; refit on size reports.
+    f.contentWindow.webkit = { messageHandlers: { kadans: { postMessage(m) {
+      log.textContent = `send ${JSON.stringify(m)}\n` + log.textContent.split('\n').slice(0, 7).join('\n');
+      if (m.action === 'size') fit();
+      if (m.action === 'theme') { theme = m.theme; applyTheme(); drawBar(); }
+    } } } };
+    show(current);
+  });
+})();
+</script>
+</body>
+</html>
