@@ -18,6 +18,7 @@ import { compactAgent, findAgent, listAgents, orcaRunner, renderAgents, runEvent
 import { setTitle } from '../lib/titles.mjs';
 import { MODE_OF, clearAutoPause, ownKey, parseUntil, runPacePost, runPacePre, setAutopace, setPace, windowOf } from '../lib/pace-control.mjs';
 import { checkStartable, describePlan, replaceAgent, startPlan, startTask } from '../lib/launch.mjs';
+import { fetchUsage, readUsageState, renderUsage, usageJson } from '../lib/usage-api.mjs';
 import { KICKOFF_ARGV, applySchedule, decide, describeSchedule, kickoffEnv, readKickoffState, runKickoff, schedulePlan } from '../lib/kickoff.mjs';
 
 const HELP = `kadans: pace Claude Code usage limits
@@ -48,10 +49,13 @@ Usage:
   kadans agent pace <id> slow|pause|none [--until reset|30m]   slow (wait before each tool call), pause
                       (halt before its next tool) or resume one of your own sessions; default --until reset
   kadans autopace on|off   auto-pace: nudge sessions when usage runs hot, slow them if the brake holds 10 min
+  kadans usage fetch [--json]   read your own account's usage (~/.claude) from Claude's usage endpoint and record
+                      it as a sample; Keychain item "Claude Code-credentials", never the refresh token; at most
+                      once a minute, backs off after errors; off with config usageApi false
   kadans hook stop|pretool|event|pace-pre|pace-post   Claude Code hooks (hook JSON on stdin; never fail)
   kadans config get [--json]           show the settings the app can change
   kadans config set <key> <value>      limits auto|five_hour|five_hour,seven_day, targets.five_hour|targets.seven_day
-                      50-100, slack 0-30, warmup.minutes 0-60, warmup.pct 0-50, notify|autopace true|false,
+                      50-100, slack 0-30, warmup.minutes 0-60, warmup.pct 0-50, notify|autopace|usageApi true|false,
                       lang en|tr, accounts.<own key>.gas true|false (your own account only),
                       kickoff.enabled true|false, kickoff.from|kickoff.to HH:MM,
                       compact.soonPct 10-95 (% of the context window) or 101 (Off), compact.nowPct 10-95,
@@ -197,6 +201,9 @@ function queueJson(home, now) {
 
 // `kadans status --json`: the panel's data (the JSON contract). Always prints JSON and exits 0;
 // problems go into `error`.
+// A reading older than this is not fresh: the menu bar dims it and the panel says how old it is.
+const FRESH_MS = 10 * 60_000;
+
 function statusJson(env, now = Date.now()) {
   const out = { version: 1, now, error: null, autopace: false, accounts: [], queue: { ready: 0, next: [] } };
   try {
@@ -204,6 +211,14 @@ function statusJson(env, now = Date.now()) {
     const cfg = loadConfig(home);
     out.autopace = cfg.autopace === true;
     out.pace = { slowSeconds: cfg.pace.slowSeconds };
+    // The usage endpoint reader (lib/usage-api.mjs): times and a short code only, no token.
+    const ua = readUsageState(home);
+    out.usageApi = {
+      enabled: cfg.usageApi === true,
+      lastOk: Number(ua.lastOk) || null,
+      lastError: typeof ua.lastError === 'string' ? ua.lastError : null,
+      nextAt: Number(ua.nextAt) > now ? Number(ua.nextAt) : null,
+    };
     // The own account is always the main ~/.claude, even when CLAUDE_CONFIG_DIR points at another profile.
     const ownKey = accountKey(join(homedir(), '.claude'));
     for (const key of listAccounts(home)) {
@@ -218,6 +233,8 @@ function statusJson(env, now = Date.now()) {
         own,
         gas: own && cfg.accounts[key]?.gas === true, // other accounts never throttle
         lastSample: samples[samples.length - 1].t,
+        fresh: now - samples[samples.length - 1].t <= FRESH_MS,
+        lastSource: samples[samples.length - 1].source === 'api' ? 'api' : 'statusline',
         state: res.state,
         limit: res.limit,
         limits: res.limits.map(limitJson),
@@ -604,6 +621,16 @@ function kickoffCmd(args, env) {
   return r.ran && !r.ok ? 1 : 0;
 }
 
+// `kadans usage fetch [--json]`: the own account only; prints percentages, never anything from the Keychain.
+async function usageCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos[0] !== 'fetch') return fail('usage: kadans usage fetch [--json]');
+  const home = kadansHome(env);
+  const r = await fetchUsage(home, { cfg: loadConfig(home) });
+  process.stdout.write(flags.json ? `${JSON.stringify(usageJson(r))}\n` : `${renderUsage(r)}\n`);
+  return r.ok || ['off', 'too_soon', 'backoff', 'no_token', 'busy'].includes(r.code) ? 0 : 1;
+}
+
 function main(argv, env = process.env) {
   const cmd = argv[0];
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') {
@@ -617,6 +644,7 @@ function main(argv, env = process.env) {
   }
   if (cmd === 'status') return status(argv.slice(1), env);
   if (cmd === 'hook') return hookCmd(argv[1], env);
+  if (cmd === 'usage') return usageCmd(argv.slice(1), env);
   try {
     if (cmd === 'project' || cmd === 'proje') return projectCmd(argv[1], argv.slice(2), env);
     if (cmd === 'task' || cmd === 'gorev' || cmd === 'görev') return taskCmd(argv[1], argv.slice(2), env);

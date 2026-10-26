@@ -139,36 +139,172 @@
     // k4c: screen 'main' | 'settings' | 'review'; from: where Review was opened; pending config picks; apply flow flags.
     screen: 'main', from: 'main', pending: {}, uninstallOpen: false, applyConfirm: false, applying: false, applied: false,
     applyFailed: false, dragging: false, deferred: false, lastHtml: '', sScroll: 0,
-    // k9a motion: seen = row key -> time it first showed (enter animation); gauge = last fill / tail per limit;
-    // firstAt = first paint (never animated); slide = settings push {dir, at}; once = one-shot classes for the next render;
+    // k9a motion: firstAt = first paint (never animated); slide = settings push {dir, at};
     // leaving = an exit animation is running. Close idle: closeAll = "Close N idle chats?" open; bulk = the run in progress.
-    seen: new Map(), gauge: new Map(), firstAt: 0, slide: null, once: new Set(), leaving: false, hoverKey: null, focusKey: null,
+    // k14: tree = the last main-panel item tree (null after a Settings / Review screen: the next main render builds anew);
+    // shown = the popover is open (host: kadans.visible); animUntil = when the running enter / leave / slide ends.
+    firstAt: 0, slide: null, leaving: false, hoverKey: null, focusKey: null, tree: null, shown: true, animUntil: 0, sizeTimer: null,
     closeAll: false, closeTimer: null, bulk: null,
     // k10b: the one compact in flight, { id, tokens (context at the click), at, failedAt }.
     // k12: the latest action result for one row, { id, ok, why, at }, shown for RESULT_KEEP_MS.
     compact: null, result: null };
 
-  // ---------- motion (k9a) ----------
-  // Calm and short: 120-260 ms, transform and opacity only (the gauge fill may sweep its width). Nothing moves on the first
-  // paint, in the 300 ms after it (fixture `after` clicks, snapshots), with reduced motion, or while the page is hidden.
+  // ---------- motion (k9a, k14) ----------
+  // Calm and short: 120-260 ms, transform and opacity only. Nothing moves on the first paint, in the 300 ms after it
+  // (fixture `after` clicks, snapshots), with reduced motion, or while the popover is closed (document.hidden, or the
+  // host's kadans.visible(false)).
   const ENTER_MS = 260;
   const LEAVE_MS = 150;
+  const SHIFT_MS = 200;
   const OUT_MS = 130;
+  const EASE = 'cubic-bezier(.2,.9,.25,1)';
   const reduced = () => {
     try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
   };
-  const motionOk = () => !reduced() && !document.hidden && view.firstAt > 0 && Date.now() - view.firstAt > 300;
-  // Enter animation for a keyed element: only for a key not on screen in the last render. A re-render while it is still
-  // running keeps it going (negative delay) instead of jumping to the end; existing rows never re-animate.
-  let seenNext = null;
-  function enter(key) {
-    const now = Date.now();
-    let t = view.seen.get(key);
-    if (t === undefined) t = motionOk() ? now : -Infinity;
-    seenNext?.set(key, t);
-    const age = now - t;
-    if (!(age < ENTER_MS)) return ['', ''];
-    return [' enter', age > 0 ? ` style="--d:-${Math.round(age)}ms"` : ''];
+  const motionOk = () => !reduced() && !document.hidden && view.shown && view.firstAt > 0 && Date.now() - view.firstAt > 300;
+  const busy = (ms) => { view.animUntil = Math.max(view.animUntil, Date.now() + ms); };
+
+  // ---------- keyed patch (k14) ----------
+  // The panel is a tree of items: { key?, html } (markup) or a shell { tag, attrs, kids, keyed } built by S(). render()
+  // builds the whole tree every time (the single source of truth); patch() compares it with the last tree, by markup
+  // strings and attribute values, never by reading the DOM. Same markup: the node is kept. A shell whose attributes
+  // changed is updated in place (class by token, so runtime classes such as enter / leave stay). Keyed kids (the
+  // panel's blocks, the agent list) are matched by key, the others by position. So hover, focus, scroll, open menus and
+  // running transitions survive the 5 s refresh, and a refresh with the same data touches no node at all.
+  const ATTR_SKIP = (v) => v === null || v === undefined || v === false;
+  const attrStr = (a) => Object.entries(a).map(([k, v]) => ` ${k}="${esc(v)}"`).join('');
+  function S(tag, attrs, kids = [], key, keyed = false) {
+    const a = {};
+    for (const [k, v] of Object.entries(attrs)) if (!ATTR_SKIP(v)) a[k] = String(v);
+    const ks = kids.filter((k) => k !== '' && k !== null && k !== undefined).map((k) => (typeof k === 'string' ? { html: k } : k));
+    return { key, tag, attrs: a, kids: ks, keyed };
+  }
+  const isShell = (it) => it.tag !== undefined;
+  function markup(it) {
+    if (!isShell(it)) return it.html;
+    if (it.m === undefined) it.m = `<${it.tag}${attrStr(it.attrs)}>${it.kids.map(markup).join('')}</${it.tag}>`;
+    return it.m;
+  }
+  const patchStats = { made: 0, replaced: 0, removed: 0, attrs: 0 };
+  function make(html) {
+    const t = document.createElement('template');
+    t.innerHTML = html;
+    patchStats.made += 1;
+    return t.content.firstChild;
+  }
+  function build(it) {
+    if (!isShell(it)) return (it.node = make(it.html));
+    const n = make(`<${it.tag}${attrStr(it.attrs)}></${it.tag}>`);
+    for (const k of it.kids) n.appendChild(build(k));
+    return (it.node = n);
+  }
+  function swapClasses(node, from, to) {
+    const a = new Set(String(from ?? '').split(' ').filter(Boolean));
+    const b = new Set(String(to ?? '').split(' ').filter(Boolean));
+    for (const c of a) if (!b.has(c)) node.classList.remove(c);
+    for (const c of b) if (!a.has(c)) node.classList.add(c);
+  }
+  function patchShell(o, n, ctx) {
+    const node = (n.node = o.node);
+    for (const k of Object.keys(o.attrs)) {
+      if (k in n.attrs) continue;
+      if (k === 'class') swapClasses(node, o.attrs.class, '');
+      else node.removeAttribute(k);
+      patchStats.attrs += 1;
+    }
+    for (const [k, v] of Object.entries(n.attrs)) {
+      if (o.attrs[k] === v) continue;
+      if (k === 'class') swapClasses(node, o.attrs.class, v);
+      else node.setAttribute(k, v);
+      patchStats.attrs += 1;
+    }
+    if (n.keyed) patchKeyed(node, o.kids, n.kids, ctx, n.fade === true);
+    else patchKids(node, o.kids, n.kids, ctx);
+  }
+  // One item against its old self: kept, patched in place or replaced. Returns the node now on screen.
+  function patchOne(o, n, ctx) {
+    if (isShell(o) && isShell(n) && o.tag === n.tag) {
+      patchShell(o, n, ctx);
+      return n.node;
+    }
+    if (markup(o) === markup(n)) return (n.node = o.node);
+    const node = build(n);
+    o.node.replaceWith(node);
+    patchStats.replaced += 1;
+    return node;
+  }
+  function patchKids(parent, ok, nk, ctx) {
+    if (ok.length !== nk.length) {
+      for (const o of ok) o.node.remove();
+      for (const n of nk) parent.appendChild(build(n));
+      patchStats.replaced += nk.length;
+      return;
+    }
+    nk.forEach((n, i) => patchOne(ok[i], n, ctx));
+  }
+  // Keyed kids: matched by key, put in order with as few moves as possible. ctx.list: rows that go away fade out and
+  // the rows under them glide up; new rows rise in.
+  function patchKeyed(parent, ok, nk, ctx, list = false) {
+    const old = new Map(ok.map((o) => [o.key, o]));
+    const born = [];
+    let prev = null;
+    for (const n of nk) {
+      const o = old.get(n.key);
+      let node;
+      if (o) {
+        old.delete(n.key);
+        node = patchOne(o, n, ctx);
+      } else {
+        node = build(n);
+        born.push(node);
+      }
+      let at = prev ? prev.nextSibling : parent.firstChild;
+      while (at && at.classList?.contains('leave')) at = at.nextSibling;
+      if (at !== node) parent.insertBefore(node, at);
+      prev = node;
+    }
+    for (const o of old.values()) {
+      if (list) leave(o.node);
+      else o.node.remove();
+      patchStats.removed += 1;
+    }
+    if (list && ctx.animate) {
+      for (const node of born) enterNode(node);
+      // One new row in the middle: the rows under it glide down instead of jumping (one height read, after all writes).
+      if (born.length === 1 && born[0].nextSibling) {
+        const node = born[0];
+        const h = node.offsetHeight || 0;
+        for (let n = node.nextSibling; h && n; n = n.nextSibling) {
+          if (!n.classList?.contains('leave')) n.animate?.([{ transform: `translateY(${-h}px)` }, { transform: 'none' }], { duration: SHIFT_MS, easing: EASE });
+        }
+      }
+    }
+    if (born.length || old.size) ctx.moved = true;
+  }
+
+  // A new row rises in (220 ms); will-change only while the class is on.
+  function enterNode(node) {
+    node.classList.add('enter');
+    busy(ENTER_MS);
+    setTimeout(() => node.classList.remove('enter'), ENTER_MS + 40);
+  }
+  // A row that went away fades out where it was, then the rows under it glide up into its place (one height read).
+  function leave(node) {
+    node.removeAttribute('data-key'); // out of focus restore, blinks and the next patch
+    if (!motionOk()) { node.remove(); return; }
+    node.inert = true;
+    node.classList.add('leave');
+    busy(LEAVE_MS + SHIFT_MS);
+    setTimeout(() => {
+      const h = node.offsetHeight || 0;
+      const after = [];
+      for (let n = node.nextSibling; n; n = n.nextSibling) if (!n.classList?.contains('leave')) after.push(n);
+      node.remove();
+      if (h && motionOk()) {
+        for (const n of after) n.animate?.([{ transform: `translateY(${h}px)` }, { transform: 'none' }], { duration: SHIFT_MS, easing: EASE });
+      }
+      settle();
+    }, LEAVE_MS);
   }
 
   // ---------- gauge card ----------
@@ -181,24 +317,35 @@
     return left < DAY ? `Resets in ${dur(left)}` : `Resets ${dayTime(l.resetsAt)}`;
   }
 
-  let limTargets = [];
-  function limitHtml(l, now, showTarget) {
+  // The fill and the projection tail are full-width layers slid into place with translateX (the track clips them), so a
+  // new value glides there by a CSS transition on transform alone: the nodes stay across refreshes (keyed patch), no
+  // reflow, no width animation. The tail sits under the fill and is always there (hidden under the fill when no tail).
+  function limitItem(l, now, showTarget, stale) {
     const pct = clamp(Math.round(finite(l.pct) ? l.pct : 0), 0, 100);
     const brakeLike = l.state === 'brake' || l.state === 'early';
     const hasTail = !l.ended && l.state !== 'unknown' && finite(l.projection) && (brakeLike || !thin(l));
     const end = brakeLike ? 100 : hasTail ? clamp(Math.round(l.projection), pct, 100) : pct;
-    const tail = hasTail && end > pct
-      ? `<div class="ahead ${brakeLike ? 'orange' : 'blue'}" style="left:${pct}%;right:${100 - end}%"></div>` : '';
+    const tail = S('div', { class: `ahead ${brakeLike ? 'orange' : 'blue'}`, style: `transform:translateX(${end - 100}%)` });
+    const fill = S('div', { class: 'fill', style: `transform:translateX(${pct - 100}%)` });
     const mark = showTarget && finite(l.target)
       ? `<div class="mark" style="left:${clamp(l.target, 0, 100)}%" title="Target ${Math.round(l.target)}%"></div>` : '';
     const name = limitName(l.name);
-    limTargets.push({ key: `${view.account}|${limTargets.length}|${l.name}`, w: pct, tl: tail ? pct : null, tr: tail ? 100 - end : null });
-    const pace = finite(l.needle) && finite(l.projection) && !l.ended
-      ? `Pace ${l.needle.toFixed(2)} pts/min · about ${Math.round(l.projection)}% at the reset` : '';
-    return `<div class="lim"><div class="lrow"><span class="k">${esc(name)}</span><span class="r">${esc(resetText(l, now))}</span>` +
-      `<span class="p">${pct}%</span></div>` +
-      `<div class="track" role="meter" aria-label="${esc(name)} used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"` +
-      `${pace ? ` title="${esc(pace)}"` : ''}><div class="fill" style="width:${pct}%"></div>${tail}${mark}</div></div>`;
+    const pace = !stale && finite(l.needle) && finite(l.projection) && !l.ended
+      ? `Pace ${l.needle.toFixed(2)} pts/min · about ${Math.round(l.projection)}% at the reset` : null;
+    const track = S('div', { class: 'track', role: 'meter', 'aria-label': `${name} used`, 'aria-valuemin': 0, 'aria-valuemax': 100,
+      'aria-valuenow': pct, title: pace }, [tail, fill, mark]);
+    return S('div', { class: 'lim' }, [`<div class="lrow"><span class="k">${esc(name)}</span><span class="r">${esc(resetText(l, now))}</span>` +
+      `<span class="p">${pct}%</span></div>`, track]);
+  }
+
+  // Stale reading: the newest usage sample is older than STALE_READING_MS. k13 may add a per-account `fresh` flag;
+  // when it is there it decides, and `lastSample` (status --json, per account) still gives the age for the text.
+  const STALE_READING_MS = 10 * MIN;
+  function staleReading(acct, now) {
+    const at = finite(acct?.lastSample) ? acct.lastSample : null;
+    const stale = typeof acct?.fresh === 'boolean' ? !acct.fresh : at !== null && now - at > STALE_READING_MS;
+    if (!stale) return null;
+    return at !== null && now > at ? `Last reading ${dur(now - at)} ago` : 'No recent reading';
   }
 
   function noteFor(acct, limits, queue, now) {
@@ -241,30 +388,32 @@
       `<div class="s">${text}</div>${buttons ? `<div class="btns">${buttons}</div>` : ''}</div></div></div>`;
   }
 
+  const msg = (mode, ...a) => ({ key: `msg:${mode}`, html: msgCard(...a) });
+
   function accountLabel(a, i, accounts) {
     if (a.own) return 'Mine';
     const others = accounts.filter((x) => !x.own);
     return others.length > 1 ? `Other ${others.indexOf(a) + 1}` : 'Other';
   }
 
-  // Returns { html, mode } where mode drives what else the panel shows.
+  // Returns { item, mode } where mode drives what else the panel shows.
   function gauge(status, now) {
     const err = status ? status.error : { code: 'read_failed', at: now };
     const accounts = Array.isArray(status?.accounts) ? status.accounts : [];
     if (err && err.code === 'no_claude') {
-      return { mode: 'no_claude', html: msgCard('wait', 'Claude Code not found',
+      return { mode: 'no_claude', item: msg('no_claude', 'wait', 'Claude Code not found',
         'Kadans works with the Claude Code CLI. Install it, sign in, then open this panel again.',
         '<button class="pill blue" data-do="install-help">How to install</button><button class="pill" data-do="check-again">Check again</button>') };
     }
     if (err && err.code !== 'no_data') {
       const ago = finite(err.at) ? Math.round((now - err.at) / MIN) : null;
       const when = ago === null ? '' : ago < 1 ? ' just now' : ` ${ago} min ago`;
-      return { mode: 'error', html: msgCard('slow', "Can't read usage data",
+      return { mode: 'error', item: msg('error', 'slow', "Can't read usage data",
         `kadans status failed${esc(when)}. Agents keep running; pacing is off until this works.`,
         '<button class="pill blue" data-do="retry">Try again</button><button class="pill" data-do="copy">Copy details</button>') };
     }
     if (!accounts.length) {
-      return { mode: 'no_data', html: msgCard('idle', 'No data yet',
+      return { mode: 'no_data', item: msg('no_data', 'idle', 'No data yet',
         "Kadans reads your limit after Claude's next reply. Send any message in Claude Code.") };
     }
     let acct = accounts.find((a) => a.key === view.account) ?? accounts[0];
@@ -274,10 +423,13 @@
         `<button aria-pressed="${a === acct}" data-do="account" data-id="${esc(a.key)}" title="${esc(a.label ?? '')}">${esc(accountLabel(a, i, accounts))}</button>`).join('')}</div>`
       : '';
     const limits = (Array.isArray(acct.limits) ? acct.limits : []).filter((l) => l && l.state !== 'nodata');
-    const [dot, note] = noteFor(acct, limits, status.queue, now);
-    const body = limits.length ? limits.map((l) => limitHtml(l, now, limits.length > 1)).join('') : '';
-    return { mode: acct.state, gas: acct.state === 'gas' && acct.own === true,
-      html: `<div class="card">${seg}${body}<div class="note"${body ? '' : ' style="margin-top:0"'}><i class="dot-${dot}"></i><span>${esc(note)}</span></div></div>` };
+    const stale = staleReading(acct, now);
+    // A stale reading is not advice: the note says how old it is, in the muted colour, whatever the state was.
+    const [dot, note] = stale ? ['gray', stale] : noteFor(acct, limits, status.queue, now);
+    const body = limits.map((l) => limitItem(l, now, limits.length > 1, Boolean(stale)));
+    const noteHtml = `<div class="note${stale ? ' stale' : ''}"${body.length ? '' : ' style="margin-top:0"'}><i class="dot-${dot}"></i><span>${esc(note)}</span></div>`;
+    return { mode: acct.state, gas: acct.state === 'gas' && acct.own === true, stale: Boolean(stale),
+      item: S('div', { class: 'card' }, [seg, ...body, noteHtml], 'gauge') };
   }
 
   // ---------- agents ----------
@@ -449,8 +601,7 @@
   }
 
   function pickerHtml(a, tasks) {
-    const [ec, es] = enter(`pick:${a.id}`);
-    return `<div class="pick${ec}"${es} role="menu" aria-label="Replace with">` +
+    return `<div class="pick" data-key="menu:pick:${esc(a.id)}" role="menu" aria-label="Replace with">` +
       `<div class="pick-h">Stop this agent and start</div>${tasks.map((t) =>
         `<button role="menuitem" data-do="pick" data-id="${esc(a.id)}" data-task="${esc(t.id)}" data-key="pick:${esc(a.id)}:${esc(t.id)}" title="${esc(t.text)}">` +
         `<span class="nm">${esc(t.text)}</span><span class="pv">${esc(t.project ?? '')}</span></button>`).join('')}</div>`;
@@ -461,8 +612,7 @@
     const item = (mode, until, name, hint) =>
       `<button role="menuitem" data-do="pace-set" data-id="${esc(a.id)}" data-mode="${mode}"${until ? ` data-until="${until}"` : ''} ` +
       `data-key="pace:${esc(a.id)}:${mode}:${until ?? ''}"><span class="nm">${esc(name)}</span><span class="pv">${esc(hint)}</span></button>`;
-    const [ec, es] = enter(`pace:${a.id}`);
-    return `<div class="pick${ec}"${es} role="menu" aria-label="Pace this agent"><div class="pick-h">Pace this agent</div>` +
+    return `<div class="pick" data-key="menu:pace:${esc(a.id)}" role="menu" aria-label="Pace this agent"><div class="pick-h">Pace this agent</div>` +
       item('slow', null, 'Slow down', `Waits ${slowS} s before each tool call`) +
       item('pause', 'reset', 'Pause until reset', finite(resetAt) ? `Holds before its next tool · ${hhmm(resetAt)}` : 'Holds before its next tool') +
       item('pause', '30m', 'Pause for 30 min', 'Then it carries on') + '</div>';
@@ -475,8 +625,10 @@
     return r.length ? Math.min(...r) : null;
   }
 
+  // Agent rows as keyed items for the list: a row is a shell (blob, text, actions) so a changed meta line replaces only
+  // its text and the row node itself (hover, focus) stays.
   function agentRows(list, now, tasks) {
-    let html = '';
+    const items = [];
     for (const a of list) {
       const st = rowState(a);
       const title = titleOf(a);
@@ -512,31 +664,29 @@
       if (rs && !rs.ok) [pre, preText, line] = [`<span class="warn" title="${esc(rs.why)}" style="${REASON_STYLE}">${esc(rs.why)}</span>`, `${rs.why}. `, ''];
       const life = tokens(a.tokens);
       const tip = life ? `${title}\n${life} tokens since start, cache reads not counted` : title;
-      const [ec, es] = enter(`row:${a.id}`);
-      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}${ec}`;
-      html += `<div class="${cls}"${es} tabindex="0" data-key="row:${esc(a.id)}" title="${esc(tip)}" aria-label="${esc(`${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}`)}">` +
-        `${avatar(shapeFor(a.id), FACE[st])}<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${tag}${pre}${esc(line)}</div></div>` +
-        `${actsHtml(a, st, tasks)}</div>`;
+      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}`;
+      const key = `row:${a.id}`;
+      items.push(S('div', { class: cls, tabindex: 0, 'data-key': key, title: tip,
+        'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}` }, [avatar(shapeFor(a.id), FACE[st]),
+        `<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${tag}${pre}${esc(line)}</div></div>`, actsHtml(a, st, tasks)], key));
       if (askC) {
-        const [wc, ws] = enter(`why:${a.id}`);
-        html += `<div class="cwhy${wc}"${ws}><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>`;
+        items.push({ key: `why:${a.id}`, html: `<div class="cwhy" data-key="why:${esc(a.id)}"><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>` });
       }
-      if (view.picker === a.id) html += pickerHtml(a, tasks);
+      if (view.picker === a.id) items.push({ key: `menu:pick:${a.id}`, html: pickerHtml(a, tasks) });
       if (view.pacer === a.id) {
         const st0 = view.data?.status;
         const slowS = finite(st0?.pace?.slowSeconds) ? st0.pace.slowSeconds : 20;
-        html += pacerHtml(a, ownReset(st0), slowS);
+        items.push({ key: `menu:pace:${a.id}`, html: pacerHtml(a, ownReset(st0), slowS) });
       }
       if (st === 'ended') continue;
       for (const s of Array.isArray(a.subagents) ? a.subagents : []) {
         if (s.status !== 'running') continue;
         const name = s.description || s.type || 'Subagent';
-        const [sc, ss] = enter(`sub:${s.id}`);
-        html += `<div class="row child${sc}"${ss} tabindex="0" data-key="sub:${esc(s.id)}" title="${esc(name)}" aria-label="${esc(`Subagent: ${name}`)}">` +
-          `${avatar(shapeFor(s.id), 'work', 22)}<div class="tx"><div class="nm">${esc(name)}</div></div></div>`;
+        items.push({ key: `sub:${s.id}`, html: `<div class="row child" tabindex="0" data-key="sub:${esc(s.id)}" title="${esc(name)}" aria-label="${esc(`Subagent: ${name}`)}">` +
+          `${avatar(shapeFor(s.id), 'work', 22)}<div class="tx"><div class="nm">${esc(name)}</div></div></div>` });
       }
     }
-    return html;
+    return items;
   }
 
   // ---------- up next and bottom bar ----------
@@ -544,7 +694,7 @@
   function upNext(queue, gas) {
     const next = Array.isArray(queue?.next) ? queue.next : [];
     if (!next.length) return '';
-    return '<div class="sh"><span>Up next</span></div>' + next.map((t) => {
+    return '<div class="upnext"><div class="sh"><span>Up next</span></div>' + next.map((t) => {
       const u = own(URGENCY, t.urgency, URGENCY.week);
       const line = [t.project ? esc(t.project) : null, t.urgency === 'urgent' ? `<span class="urgent">${u}</span>` : u].filter(Boolean).join(' · ');
       const ok = t.approved ? '' : ' · needs your OK';
@@ -552,18 +702,20 @@
         ? `<button class="pill${gas ? ' blue' : ''}" data-do="start" data-id="${esc(t.id)}">Start</button>`
         : `<button class="pill${gas ? '' : ' blue'}" data-do="approve" data-id="${esc(t.id)}">Approve</button>`;
       return `<div class="row" title="${esc(t.text)}"><div class="tx"><div class="nm">${esc(t.text)}</div><div class="pv">${line}${ok}</div></div>${b}</div>`;
-    }).join('');
+    }).join('') + '</div>';
   }
 
   function bottom(status, mode) {
     const live = typeof status?.autopace === 'boolean';
     const on = live && status.autopace && mode !== 'no_claude';
+    // Shells down to the switch, so a flip keeps its node and the knob slides.
     const sw = live
-      ? `<button class="sw" role="switch" aria-checked="${on}" aria-label="Auto-pace" data-do="autopace"></button>`
-      : `<button class="sw" role="switch" aria-checked="false" aria-disabled="true" aria-label="Auto-pace (${SOON})" title="${SOON}"></button>`;
-    return `<div class="bottom"><div class="toggle">${sw}<span aria-hidden="true">Auto-pace</span></div><div class="sp">` +
+      ? S('button', { class: 'sw', role: 'switch', 'aria-checked': on, 'aria-label': 'Auto-pace', 'data-do': 'autopace' })
+      : S('button', { class: 'sw', role: 'switch', 'aria-checked': false, 'aria-disabled': true, 'aria-label': `Auto-pace (${SOON})`, title: SOON });
+    return S('div', { class: 'bottom' }, [S('div', { class: 'toggle' }, [sw, '<span aria-hidden="true">Auto-pace</span>']),
+      '<div class="sp">' +
       `<button class="ic" title="Theme" aria-label="Theme" data-do="theme">${IC.theme}</button>` +
-      `<button class="ic" title="Settings" aria-label="Settings" data-do="settings">${IC.gear}</button></div></div>`;
+      `<button class="ic" title="Settings" aria-label="Settings" data-do="settings">${IC.gear}</button></div>`], 'bottom');
   }
 
   // ---------- settings and hook setup (k4c) ----------
@@ -853,7 +1005,6 @@
     view.lastHtml = '';
     const status = view.data.status ?? null;
     const now = finite(status?.now) ? status.now : Date.now();
-    limTargets = [];
     const g = gauge(status, now);
     const { all, old, live } = split(now);
     const tasks = startable(status?.queue);
@@ -869,42 +1020,70 @@
     shapeMap = assignShapes([...live.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 0 })), ...live.flatMap((a) => subs(a, 1)),
       ...old.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 2 })), ...old.flatMap((a) => subs(a, 3))]);
 
-    seenNext = new Map();
-    let html = g.html;
+    const blocks = [];
     if (g.mode !== 'no_claude') {
-      html += `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>`;
-      const group = old.length ? groupHtml(old, now) + (view.idleOpen ? agentRows(old, now, tasks) : '') : '';
-      html += all.length
-        ? `<div class="list" id="k-list">${agentRows(live, now, tasks)}${group}</div>`
-        : `<div class="empty">${avatar('egg', 'idle')}<div><div class="nm">No agents running</div>` +
-          '<div class="s">They show up here when Claude Code starts one.</div></div></div>';
+      const hk = hookCard(view.data.install);
+      if (hk) blocks.push({ key: 'hook', html: hk });
     }
-    if (g.mode !== 'no_claude' && g.mode !== 'no_data' && g.mode !== 'error') html += upNext(status?.queue, g.gas);
-    html += bottom(status, g.mode);
-    if (g.mode !== 'no_claude') html = hookCard(view.data.install) + html;
+    blocks.push(g.item);
+    if (g.mode !== 'no_claude') {
+      blocks.push({ key: 'sh', html: `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>` });
+      const rows = agentRows(live, now, tasks);
+      if (old.length) rows.push(groupHtml(old, now), ...(view.idleOpen ? agentRows(old, now, tasks) : []));
+      if (all.length) {
+        const list = S('div', { class: 'list', id: 'k-list' }, rows, 'list', true);
+        list.fade = true;
+        blocks.push(list);
+      } else {
+        blocks.push({ key: 'empty', html: `<div class="empty">${avatar('egg', 'idle')}<div><div class="nm">No agents running</div>` +
+          '<div class="s">They show up here when Claude Code starts one.</div></div></div>' });
+      }
+    }
+    if (g.mode !== 'no_claude' && g.mode !== 'no_data' && g.mode !== 'error') {
+      const up = upNext(status?.queue, g.gas);
+      if (up) blocks.push({ key: 'upnext', html: up });
+    }
+    blocks.push(bottom(status, g.mode));
+    const tree = S('div', { class: 'panel', role: 'dialog', 'aria-label': 'Kadans' }, blocks, 'panel', true);
 
     const el = root();
     const focusKey = keyOf(document.activeElement);
-    const oldList = document.getElementById('k-list');
-    if (oldList) view.scroll = oldList.scrollTop;
-    const [pc, ps] = slideIn('back');
-    el.innerHTML = `<div class="panel${pc}"${ps} role="dialog" aria-label="Kadans">${html}</div>`;
-    view.seen = seenNext;
-    seenNext = null;
-    view.once.clear();
-    const list = document.getElementById('k-list');
-    if (list) {
-      list.scrollTop = view.scroll;
-      fade(list);
+    const before = patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs;
+    const prev = view.tree;
+    const ctx = { animate: motionOk(), moved: false };
+    let full = false;
+    if (prev?.node && prev.node.parentNode === el) patchShell(prev, tree, ctx);
+    else {
+      full = true;
+      el.innerHTML = '';
+      el.appendChild(build(tree));
+      const sl = view.slide;
+      if (sl?.dir === 'back' && Date.now() - sl.at < ENTER_MS) {
+        tree.node.classList.add('back');
+        busy(ENTER_MS);
+        setTimeout(() => tree.node.classList.remove('back'), ENTER_MS + 40);
+      }
+      view.slide = null;
+      const list = listNode(tree);
+      if (list && view.scroll) list.scrollTop = view.scroll;
     }
-    sweepGauge(el);
+    view.tree = tree;
     if (view.focusPick) {
       view.focusPick = false;
       el.querySelector('.pick [data-do="pick"], .pick [data-do="pace-set"]')?.focus();
-    } else if (focusKey) restoreFocus(el, focusKey);
+    } else if (focusKey && !el.contains(document.activeElement)) restoreFocus(el, focusKey);
     if (!view.firstAt) view.firstAt = Date.now();
-    reportSize();
+    // Layout is read only when something changed: an unchanged refresh costs no style or layout work at all.
+    if (full || patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs !== before) settle();
     scheduleBlinks();
+  }
+
+  const listNode = (tree = view.tree) => tree?.kids?.find((k) => k.key === 'list')?.node ?? null;
+  // After the DOM changed: the list's scroll fade and the popover height (both read layout once, together).
+  function settle() {
+    const list = view.screen === 'main' ? listNode() : null;
+    if (list) fade(list);
+    reportSize();
   }
 
   // all: rows the panel shows; old: idle chats quiet for 2+ hours, folded into the "N idle" group at the end; live: the rest.
@@ -961,10 +1140,10 @@
     } else if (closable) {
       right = `<button class="pill quiet" data-do="close-all" title="Close the ${plural(closable, 'chat', 'chats')} quiet for 2+ hours">Close all</button>`;
     }
-    const [ec, es] = enter('grp');
-    return `<div class="row grp${ec}"${es} data-key="grp"><button class="grp-t" data-do="idle" data-key="idle-group" aria-expanded="${view.idleOpen}">` +
-      `${avatar('egg', 'idle', 22)}<span class="tx"><span class="nm">${n} idle</span><span class="pv">${line}</span></span>` +
-      `${view.closeAll && closable ? '' : `<span class="chev${view.once.has('chev') ? ' turn' : ''}" aria-hidden="true">${IC.chev}</span>`}</button>${right}</div>`;
+    const toggle = S('button', { class: 'grp-t', 'data-do': 'idle', 'data-key': 'idle-group', 'aria-expanded': view.idleOpen }, [
+      avatar('egg', 'idle', 22), `<span class="tx"><span class="nm">${n} idle</span><span class="pv">${line}</span></span>`,
+      view.closeAll && closable ? '' : `<span class="chev" aria-hidden="true">${IC.chev}</span>`]);
+    return S('div', { class: 'row grp', 'data-key': 'grp' }, [toggle, right], 'grp');
   }
 
   // The chats Close all would close right now (worked out again when the owner confirms, not when the confirm opened).
@@ -1013,42 +1192,16 @@
     return [` ${dir}`, age > 0 ? ` style="--d:-${Math.round(age)}ms"` : ''];
   }
 
-  // Gauge: the new markup carries the new width; put the old one back, flush styles, then set the new one so the CSS
-  // transition runs. A forced reflow, not requestAnimationFrame (that never fires in the offscreen snapshot window).
-  function sweepGauge(el) {
-    const prev = view.gauge;
-    const nodes = el.querySelectorAll('.lim');
-    const moves = [];
-    view.gauge = new Map(limTargets.map((t) => [t.key, t]));
-    if (!motionOk()) return;
-    limTargets.forEach((t, i) => {
-      const p = prev.get(t.key);
-      const node = nodes[i];
-      if (!p || !node) return;
-      const fill = node.querySelector('.fill');
-      const tail = node.querySelector('.ahead');
-      if (fill && p.w !== t.w) {
-        fill.style.width = `${p.w}%`;
-        moves.push(() => { fill.style.width = `${t.w}%`; });
-      }
-      if (tail && p.tl !== null && (p.tl !== t.tl || p.tr !== t.tr)) {
-        tail.style.left = `${p.tl}%`;
-        tail.style.right = `${p.tr}%`;
-        moves.push(() => { tail.style.left = `${t.tl}%`; tail.style.right = `${t.tr}%`; });
-      }
-    });
-    if (!moves.length) return;
-    void el.offsetWidth;
-    moves.forEach((f) => f());
-  }
-
   // Blobs: a small squish and blink when the pointer or focus reaches a row (once per arrival, not per re-render).
+  // Web Animations, so a replay needs no forced reflow; the same keyframes as before (k-squish, k-blink).
+  const SQUISH = [{ transform: 'none' }, { transform: 'scale(1.06, .92)', offset: 0.35 }, { transform: 'scale(.98, 1.02)', offset: 0.7 }, { transform: 'none' }];
+  const BLINK = [{ transform: 'none' }, { transform: 'scaleY(.1)', offset: 0.3 }, { transform: 'scaleY(.1)', offset: 0.65 }, { transform: 'none' }];
   function poke(av) {
-    if (!av || !motionOk() || av.closest?.('.ended')) return;
-    av.classList.remove('poke');
-    void av.getBoundingClientRect();
-    av.classList.add('poke');
-    setTimeout(() => av.classList.remove('poke'), 420);
+    if (!av || !motionOk() || av.closest?.('.ended') || typeof av.animate !== 'function') return;
+    av.animate(SQUISH, { duration: 320, easing: EASE });
+    if (/\bf-(work|wait|idle)\b/.test(av.getAttribute('class') ?? '')) av.querySelector('.fc')?.animate(BLINK, { duration: 180, easing: 'ease-in-out' });
+    av.classList.add('poke'); // marker only: the timer blink skips a blob that is being poked
+    setTimeout(() => av.classList.remove('poke'), 340);
   }
   let restoring = false;
   function onArrive(e) {
@@ -1071,7 +1224,7 @@
   function scheduleBlinks() {
     clearTimeout(blinks.timer);
     blinks.timer = null;
-    if (view.screen !== 'main' || reduced() || document.hidden) return;
+    if (view.screen !== 'main' || reduced() || document.hidden || !view.shown) return;
     const now = Date.now();
     const due = new Map();
     for (const [key] of workingBlobs()) due.set(key, blinks.due.get(key) ?? nextBlink(now));
@@ -1109,15 +1262,18 @@
     const label = view.screen === 'review' ? 'Hooks in Claude Code' : 'Kadans settings';
     const [pc, ps] = view.slide?.dir === 'in' ? slideIn('in') : slideIn('back');
     el.innerHTML = `<div class="panel screen${view.screen === 'settings' ? ' tall' : ''}${pc}"${ps} role="dialog" aria-label="${label}">${inner}</div>`;
+    view.tree = null; // the main panel is built anew when it comes back
+    if (pc) busy(ENTER_MS);
     scheduleBlinks();
     const body = document.getElementById('k-sbody');
     if (body) body.scrollTop = view.sScroll;
     if (focusKey) restoreFocus(el, focusKey);
-    reportSize();
+    settle();
   }
 
   // dir: 'in' (Settings, Review) or 'back' (the screen you return to).
   function go(screen, dir = 'in') {
+    if (view.screen === 'main' && view.tree) view.scroll = listNode()?.scrollTop ?? 0;
     view.slide = motionOk() ? { dir, at: Date.now() } : null;
     view.screen = screen;
     view.lastHtml = '';
@@ -1159,13 +1315,21 @@
     list.classList.toggle('end', over && list.scrollTop + list.clientHeight >= list.scrollHeight - 1);
   }
 
+  // The popover follows the page height: it grows at once (nothing gets cut off), and shrinks only after the running
+  // enter / leave / slide is over, so it never resizes under a moving row. The host coalesces what is left.
   function reportSize() {
+    clearTimeout(view.sizeTimer);
+    view.sizeTimer = null;
     const p = root().firstElementChild;
     const h = p ? Math.ceil(p.getBoundingClientRect().height) : 0;
-    if (h && h !== view.height) {
-      view.height = h;
-      send({ action: 'size', height: h });
+    if (!h || h === view.height) return;
+    const wait = view.animUntil - Date.now();
+    if (h < view.height && wait > 0) {
+      view.sizeTimer = setTimeout(reportSize, wait + 20);
+      return;
     }
+    view.height = h;
+    send({ action: 'size', height: h });
   }
 
   // ---------- actions ----------
@@ -1244,30 +1408,15 @@
         break;
       }
       case 'idle': {
-        if (view.leaving) return;
-        if (view.idleOpen && motionOk() && b.closest) {
-          // Collapse: the group's rows fade out and the chevron turns back, then the list closes.
-          b.setAttribute('aria-expanded', 'false');
-          for (let n = b.closest('.row.grp')?.nextElementSibling; n; n = n.nextElementSibling) n.classList.add('leave');
-          view.leaving = true;
-          setTimeout(() => { view.leaving = false; view.idleOpen = false; render({}); }, LEAVE_MS);
-          return;
-        }
+        // Open: the rows rise in; collapse: they fade out (keyed patch). The chevron turns by its transition.
         view.idleOpen = !view.idleOpen;
-        if (view.idleOpen && motionOk()) view.once.add('chev');
         break;
       }
       case 'open': send({ action: 'open', id }); return;
       case 'dismiss': {
         view.dismissed.add(id);
         send({ action: 'dismiss', id });
-        const row = b.closest?.('.row');
-        if (row && motionOk()) {
-          row.classList.add('leave');
-          setTimeout(() => render({}), LEAVE_MS);
-          return;
-        }
-        break;
+        break; // the row fades out (keyed patch)
       }
       case 'start': case 'approve': send({ action: b.dataset.do, id: numId }); return;
       case 'account': view.account = id; send({ action: 'account', id }); break;
@@ -1411,15 +1560,48 @@
     document.addEventListener('visibilitychange', scheduleBlinks);
   }
 
+  // ---------- dev-only frame probe (k14) ----------
+  // Off in the shipped panel: it records only when the page URL has ?debugFrames or window.kadans.debugFrames is true.
+  // frames.start() begins recording requestAnimationFrame gaps; frames.stop() returns { n, p50, p95, max, long } in ms
+  // (long: frames over 25 ms), or null when off.
+  const probe = { t: [], last: 0, raf: 0, on: false };
+  const probeOn = () => {
+    try { return /[?&]debugFrames\b/.test(location.search) || window.kadans?.debugFrames === true; } catch { return false; }
+  };
+  const frames = {
+    start() {
+      if (!probeOn() || typeof requestAnimationFrame !== 'function') return false;
+      cancelAnimationFrame(probe.raf);
+      Object.assign(probe, { t: [], last: 0, on: true });
+      const tick = (ts) => {
+        if (!probe.on) return;
+        if (probe.last) probe.t.push(ts - probe.last);
+        probe.last = ts;
+        probe.raf = requestAnimationFrame(tick);
+      };
+      probe.raf = requestAnimationFrame(tick);
+      return true;
+    },
+    stop() {
+      if (!probe.on) return null;
+      probe.on = false;
+      cancelAnimationFrame(probe.raf);
+      const d = [...probe.t].sort((a, b) => a - b);
+      if (!d.length) return null;
+      const q = (p) => Math.round(d[Math.min(d.length - 1, Math.floor(p * d.length))] * 10) / 10;
+      return { n: d.length, p50: q(0.5), p95: q(0.95), max: q(1), long: d.filter((x) => x > 25).length };
+    },
+  };
+
   // dev.html only: start a fixture from a clean slate (render keeps keys a payload leaves out).
   function reset() {
     view.data = {};
     view.pending = {};
     view.screen = 'main';
     view.lastHtml = '';
-    view.seen = new Map();
-    view.gauge = new Map();
+    view.tree = null;
     view.firstAt = 0;
+    view.animUntil = 0;
     view.slide = null;
     view.closeAll = false;
     view.bulk = null;
@@ -1428,7 +1610,13 @@
     view.result = null;
     setConfirm(null);
   }
-  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes };
+  // The host says when the popover opens and closes (WKWebView does not reliably report document.hidden for a closed
+  // NSPopover): closed, the blink timer stops and nothing animates.
+  function visible(on) {
+    view.shown = on !== false;
+    scheduleBlinks();
+  }
+  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();

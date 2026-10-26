@@ -7,7 +7,7 @@ One click to slow, pause, replace or stop an agent.
 
 ![The Kadans panel while the brake is on](docs/images/panel-brake.png)
 
-Kadans is free and open source (MIT). It runs only on your Mac and makes no network calls.
+Kadans is free and open source (MIT). It runs only on your Mac; its only network call is reading your own usage from Anthropic (see Privacy).
 
 ## What it shows
 
@@ -134,9 +134,11 @@ Each kickoff spends a tiny amount of your quota (one short Haiku reply).
 
 ## Privacy
 
-- No network calls of its own. Kadans has no server and sends nothing anywhere. The one exception is kickoff (off by
-  default): it runs `claude`, which talks to Anthropic as it always does.
-- Official data only: the usage numbers Claude Code already passes to its status line. No scraping, no extra API calls.
+- No server, and nothing is sent anywhere. One network call of its own: every 2 minutes the app reads your own usage
+  from `api.anthropic.com/api/oauth/usage` (what Claude Code's `/usage` shows), with Claude Code's sign-in from the
+  Keychain, so usage from claude.ai or another device shows up too. The token is never stored, logged or refreshed.
+  Off with `kadans config set usageApi false`. Kickoff (off by default) runs `claude`, which talks to Anthropic as usual.
+- Official data only: the usage numbers Claude Code passes to its status line and shows in `/usage`. No scraping.
 - No account, sign-in, API key or tracking.
 - Everything it stores is in `~/.kadans`. Usage samples are kept 8 days and the event log 2 days.
 - It also reads session transcripts under `~/.claude/projects` (read-only) for token counts, the model and titles.

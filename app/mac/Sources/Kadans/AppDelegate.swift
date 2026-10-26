@@ -1,6 +1,7 @@
 import AppKit
 
 /// Menu bar item + popover. Refreshes every 5 s while the popover is open, 30 s otherwise.
+/// Reads fresh usage (`kadans usage fetch`) every 120 s and on popover open when the last reading is over 60 s old.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
@@ -8,6 +9,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var timer: Timer?
     private var lastTitle = ""
     private let blinker = BlobBlinker()
+    private var usageTimer: Timer?
+    /// Main thread only: true while a `usage fetch` runs, so two never run at once.
+    private var usageBusy = false
+    private let usageQueue = DispatchQueue(label: "dev.kadans.usage", qos: .utility)
+    /// Newest own-account sample time (epoch ms) from the last status read.
+    private var ownLastSample: Double?
+
+    static let usageEvery: TimeInterval = 120
+    static let usageStaleOnOpen: TimeInterval = 60
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -39,6 +49,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         panel.onLoaded = { [weak self] in self?.panel.refresh(full: true) }
         panel.load()
         schedule(every: 30)
+        startUsagePolling()
+    }
+
+    // MARK: fresh usage (lib/usage-api.mjs; the CLI checks config usageApi, back-off and the 60 s minimum itself)
+
+    private func startUsagePolling() {
+        let t = Timer(timeInterval: Self.usageEvery, repeats: true) { [weak self] _ in self?.fetchUsage() }
+        t.tolerance = 10
+        RunLoop.main.add(t, forMode: .common)
+        usageTimer = t
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.fetchUsage() }
+    }
+
+    /// Runs `kadans usage fetch --json` off the main thread. The first run may wait on a macOS Keychain dialog,
+    /// hence the long timeout. Logs only the result code (the CLI never prints a token).
+    private func fetchUsage() {
+        guard !usageBusy else { return }
+        usageBusy = true
+        usageQueue.async { [weak self] in
+            let r = CLI.run(["usage", "fetch", "--json"], timeout: 90)
+            let obj = r.json as? [String: Any]
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.usageBusy = false
+                if (obj?["ok"] as? Bool) == true {
+                    self.panel.refresh()
+                } else {
+                    let code = obj?["code"] as? String ?? (r.timedOut ? "timeout" : "exit \(r.code)")
+                    if !["off", "too_soon", "backoff"].contains(code) { log("usage fetch: \(code)") }
+                }
+            }
+        }
     }
 
     @objc private func togglePopover(_ sender: Any?) {
@@ -56,6 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentViewController?.view.window?.makeKey()
         panel.refresh(full: true)
         schedule(every: 5)
+        let newest = ownLastSample.map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantPast
+        if Date().timeIntervalSince(newest) > Self.usageStaleOnOpen { fetchUsage() }
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -76,6 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func updateItem(_ status: [String: Any]?) {
         guard let button = statusItem.button else { return }
         let item = MenuBarItem(status: status)
+        let accounts = status?["accounts"] as? [[String: Any]] ?? []
+        ownLastSample = (accounts.first { ($0["own"] as? Bool) == true }?["lastSample"] as? NSNumber)?.doubleValue
         blinker.setFace(item.face)  // a state change wins over a blink in progress
         button.attributedTitle = item.title
         button.setAccessibilityLabel(item.accessibilityLabel)
@@ -102,6 +148,8 @@ struct MenuBarItem {
         // The tightest applicable limit: the one the account state names, else the highest percentage.
         let lim = limits.first { ($0["name"] as? String) == named && named != nil } ?? limits.max { pct($0) < pct($1) }
         let state = acct?["state"] as? String ?? "nodata"
+        // An old reading (no sample for 10+ minutes) is shown dimmed.
+        let fresh = acct?["fresh"] as? Bool ?? true
 
         guard let lim, pct(lim) >= 0 else {
             face = .work
@@ -122,7 +170,8 @@ struct MenuBarItem {
             text.append(NSAttributedString(string: "● ", attributes: [.font: NSFont.systemFont(ofSize: 7), .foregroundColor: dot,
                                                                       .baselineOffset: 2]))
         }
-        text.append(NSAttributedString(string: "\(p)%", attributes: [.font: Self.font, .foregroundColor: NSColor.labelColor]))
+        text.append(NSAttributedString(string: "\(p)%", attributes: [.font: Self.font,
+                                                                    .foregroundColor: fresh ? NSColor.labelColor : NSColor.secondaryLabelColor]))
         face = state == "brake" ? .slow : .work
         title = text
         plainTitle = (dot != nil ? "● " : "") + "\(p)%"
@@ -136,7 +185,7 @@ struct MenuBarItem {
         }
         let words = ["brake": "braking", "cruise": "on pace", "gas": "spare quota", "early": "early in the window",
                      "unknown": "too little data yet"][state] ?? state
-        accessibilityLabel = "Kadans, \(name) \(p) percent, \(words)"
+        accessibilityLabel = "Kadans, \(name) \(p) percent, \(words)" + (fresh ? "" : ", last reading is over 10 minutes old")
     }
 
     static let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize(for: .small) + 1, weight: .medium)

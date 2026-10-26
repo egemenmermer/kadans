@@ -94,13 +94,14 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .lrow .r { margin-left: auto; color: var(--label2); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .lrow .p { font-weight: 600; font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
 .track { position: relative; height: 6px; border-radius: var(--r-track); background: var(--track); margin-top: 8px; overflow: hidden; }
-.fill { position: absolute; inset: 0 auto 0 0; border-radius: var(--r-track); background: linear-gradient(90deg, var(--blue), var(--blue2));
-  transition: width .4s var(--ease-sw); }
-.ahead { position: absolute; top: 0; bottom: 0; border-radius: 0 var(--r-track) var(--r-track) 0; transition: left .4s var(--ease-sw), right .4s var(--ease-sw); }
+/* k14: fill and tail are full-width layers slid with translateX (the track clips them): transform-only transitions. */
+.fill, .ahead { position: absolute; inset: 0; border-radius: var(--r-track); transform: translateX(-100%); transition: transform .4s var(--ease-sw); }
+.fill { background: linear-gradient(90deg, var(--blue), var(--blue2)); }
 .ahead.orange { background: var(--soft-orange); }
 .ahead.blue { background: var(--soft-blue); }
 .mark { position: absolute; top: -2px; bottom: -2px; width: 1.5px; background: var(--label3); }
 .note { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 12px; color: var(--label2); font-variant-numeric: tabular-nums; }
+.note.stale { color: var(--label2); } /* k14: an old reading, not advice */
 .note i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .dot-orange { background: var(--orange); }
 .dot-blue { background: var(--blue); }
@@ -173,7 +174,6 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .chev { flex: none; width: 26px; display: grid; place-items: center; color: var(--label2); }
 .chev svg { width: 13px; height: 13px; transition: transform .2s var(--ease-out); }
 [aria-expanded="true"] > .chev svg { transform: rotate(90deg); }
-.chev.turn svg { animation: k-turn .2s var(--ease-out); }
 .pill.quiet { background: none; color: var(--label2); padding: 4px 9px; transition: background-color .12s ease-out, color .12s ease-out, transform .1s ease-out; }
 .pill.quiet:hover { background: var(--pill); color: var(--label); }
 .pill { font-size: 12px; font-weight: 500; border-radius: var(--r-full); padding: 5px 12px; background: var(--pill); white-space: nowrap; flex: none;
@@ -262,11 +262,12 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
 .rb:active, .ic:active { transform: scale(.92); }
 .sure { transition: transform .1s ease-out; }
 .seg button, .acct button { transition: transform .1s ease-out, background-color .15s ease-out, color .15s ease-out; }
-/* New rows and menus: a short rise; rows going away fade. --d is a negative delay when a re-render lands mid-way. */
-.enter { animation: k-rise .22s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
-.cwhy.enter { animation: k-rise .16s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
-.pick.enter { animation: k-pop .16s var(--ease-out) backwards; animation-delay: var(--d, 0ms); transform-origin: top right; }
-.leave { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease-out, transform .15s ease-out; pointer-events: none; }
+/* New rows and menus: a short rise; rows going away fade (faster than they came). The keyed patch keeps nodes across
+   refreshes, so these run once per row; will-change only while the class is on. */
+.enter { animation: k-rise .22s var(--ease-out) backwards; will-change: transform, opacity; }
+.cwhy.enter { animation-name: k-rise; animation-duration: .16s; }
+.pick.enter { animation: k-pop .16s var(--ease-out) backwards; transform-origin: top right; }
+.leave { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease-out, transform .15s ease-out; pointer-events: none; will-change: transform, opacity; }
 /* Settings and Review push in from the right; the screen you come back to returns from the left. */
 .panel.in > * { animation: k-push .24s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
 .panel.back > * { animation: k-back .22s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
@@ -274,14 +275,12 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
 /* Blobs: a small squish when a row is reached, and a ~120 ms blink (eyes shut) then and now. Never a loop. */
 .av { transform-origin: 50% 90%; }
 .av .fc { transform-box: fill-box; transform-origin: center; }
-.av.poke { animation: k-squish .32s var(--ease-out); }
-.av.poke:is(.f-work, .f-wait, .f-idle) .fc, .av.blink:is(.f-work, .f-wait, .f-idle) .fc { animation: k-blink .18s ease-in-out; }
+/* The squish and the arrival blink run as Web Animations from panel.js (poke); the timer blink is this class. */
+.av.blink:is(.f-work, .f-wait, .f-idle) .fc { animation: k-blink .18s ease-in-out; }
 @keyframes k-rise { from { opacity: 0; transform: translateY(4px); } }
 @keyframes k-pop { from { opacity: 0; transform: scale(.97) translateY(-3px); } }
 @keyframes k-push { from { opacity: 0; transform: translateX(18px); } }
 @keyframes k-back { from { opacity: 0; transform: translateX(-12px); } }
-@keyframes k-turn { from { transform: rotate(0deg); } }
-@keyframes k-squish { 35% { transform: scale(1.06, .92); } 70% { transform: scale(.98, 1.02); } }
 @keyframes k-blink { 30%, 65% { transform: scaleY(.1); } }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

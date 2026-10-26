@@ -18,21 +18,99 @@ const ATTRS = new Set(['id', 'class', 'role', 'tabindex', 'title', 'style', 'dat
   'aria-valuetext', 'width', 'height', 'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
   'd', 'x', 'y', 'rx', 'ry', 'cx', 'cy', 'r', 'transform', 'type', 'min', 'max', 'step', 'value']);
 
+// A small DOM for the keyed patch (k14): elements made from markup keep their inner markup as a string; shells built
+// by appending children serialise from their children. Every change is logged as [op, data-key or tag], so a test can
+// tell which nodes a render touched. innerHTML reads back the whole tree, so the markup tests read what is on screen.
+const UNESC = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const ESCA = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+class FNode {
+  constructor(log, tag, attrs = [], inner = '', text = null) {
+    Object.assign(this, { log, tag, inner, text, kids: [], parentNode: null, listeners: {} });
+    this.attrs = new Map(attrs);
+  }
+  static parse(log, html) {
+    const m = /^<([a-zA-Z][\w-]*)((?:\s+[\w:-]+(?:="[^"]*")?)*)\s*>/.exec(html);
+    if (!m) return new FNode(log, '#text', [], '', html);
+    const attrs = [...m[2].matchAll(/([\w:-]+)(?:="([^"]*)")?/g)].map((a) => [a[1], (a[2] ?? '').replace(/&(amp|lt|gt|quot|#39);/g, (e) => UNESC[e])]);
+    const close = `</${m[1]}>`;
+    return new FNode(log, m[1], attrs, html.endsWith(close) ? html.slice(m[0].length, -close.length) : html.slice(m[0].length));
+  }
+  key() { return this.attrs.get('data-key') ?? this.tag; }
+  get outerHTML() {
+    if (this.tag === '#text') return this.text;
+    return `<${this.tag}${[...this.attrs].map(([k, v]) => ` ${k}="${v.replace(/[&<>"']/g, (c) => ESCA[c])}"`).join('')}>${this.innerHTML}</${this.tag}>`;
+  }
+  get innerHTML() { return this.kids.length ? this.kids.map((k) => k.outerHTML).join('') : this.inner; }
+  set innerHTML(v) {
+    for (const k of this.kids) k.parentNode = null;
+    this.kids = [];
+    this.inner = '';
+    if (v) this.appendChild(FNode.parse(this.log, v));
+  }
+  get dataset() {
+    const d = {};
+    for (const [k, v] of this.attrs) if (k.startsWith('data-')) d[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
+    return d;
+  }
+  get classList() {
+    const get = () => (this.attrs.get('class') ?? '').split(' ').filter(Boolean);
+    const set = (a) => { this.attrs.set('class', a.join(' ')); this.log.push(['class', this.key()]); };
+    return {
+      add: (c) => { const a = get(); if (!a.includes(c)) set([...a, c]); },
+      remove: (c) => { const a = get(); if (a.includes(c)) set(a.filter((x) => x !== c)); },
+      contains: (c) => get().includes(c),
+      toggle: (c, on) => { const a = get(); if (on && !a.includes(c)) set([...a, c]); else if (!on && a.includes(c)) set(a.filter((x) => x !== c)); },
+    };
+  }
+  setAttribute(k, v) { this.attrs.set(k, String(v)); this.log.push(['attr', this.key(), k]); }
+  removeAttribute(k) { this.log.push(['attr', this.key(), k]); this.attrs.delete(k); }
+  getAttribute(k) { return this.attrs.get(k) ?? null; }
+  appendChild(n) { return this.insertBefore(n, null); }
+  insertBefore(n, ref) {
+    if (n.parentNode) n.parentNode.kids.splice(n.parentNode.kids.indexOf(n), 1);
+    const i = ref ? this.kids.indexOf(ref) : -1;
+    if (i < 0) this.kids.push(n); else this.kids.splice(i, 0, n);
+    n.parentNode = this;
+    this.log.push(['insert', n.key()]);
+    return n;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    this.log.push(['remove', this.key()]);
+    this.parentNode.kids.splice(this.parentNode.kids.indexOf(this), 1);
+    this.parentNode = null;
+  }
+  replaceWith(n) {
+    const p = this.parentNode;
+    if (!p) return;
+    this.log.push(['replace', this.key()]);
+    p.kids[p.kids.indexOf(this)] = n;
+    n.parentNode = p;
+    this.parentNode = null;
+  }
+  get firstChild() { return this.kids[0] ?? null; }
+  get firstElementChild() { return this.kids[0] ?? null; }
+  get nextSibling() { const p = this.parentNode; return p ? p.kids[p.kids.indexOf(this) + 1] ?? null : null; }
+  contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
+  addEventListener(t, fn) { (this.listeners[t] ??= []).push(fn); }
+  find(key) {
+    if (this.attrs.get('data-key') === key) return this;
+    for (const k of this.kids) { const f = k.find(key); if (f) return f; }
+    return null;
+  }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  getBoundingClientRect() { return { height: 0 }; }
+  closest() { return null; }
+  animate() { return {}; }
+}
+
 // opts.clock: { now } read by Date.now() in the page; opts.timers: an array that collects setTimeout callbacks to run by hand.
 function loadPanel(opts = {}) {
   const sent = [];
-  let html = '';
-  let click = null;
-  const el = {
-    id: 'kadans',
-    set innerHTML(v) { html = v; },
-    get innerHTML() { return html; },
-    contains: () => false,
-    addEventListener(type, fn) { if (type === 'click') click = fn; },
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    firstElementChild: null,
-  };
+  const log = [];
+  const el = new FNode(log, 'div', [['id', 'kadans']]);
+  const click = (e) => el.listeners.click[0](e);
   const noop = () => {};
   const document = {
     readyState: 'complete',
@@ -40,7 +118,8 @@ function loadPanel(opts = {}) {
     documentElement: { dataset: {} },
     activeElement: null,
     getElementById: (id) => (id === 'kadans' ? el : null),
-    createElement: () => el,
+    createElement: (tag) => (tag === 'template'
+      ? { content: null, set innerHTML(h) { this.content = { firstChild: FNode.parse(log, h) }; } } : el),
     addEventListener: noop,
     querySelectorAll: () => [],
     // fixtures' `after` hooks click buttons: find the data-do / data-id in the selector and run the panel's click handler
@@ -63,7 +142,7 @@ function loadPanel(opts = {}) {
     .map((f) => read(join('fixtures', f))).join('\n;\n'), ctx);
   // a click on any element by its dataset (Settings segments carry data-k / data-v, which the fake querySelector does not parse)
   const tap = (dataset) => click({ target: { closest: () => ({ dataset, getAttribute: () => null }) } });
-  return { window, document, html: () => html, sent, tap };
+  return { window, document, html: () => el.innerHTML, sent, tap, el, log };
 }
 
 // Fails on any tag or attribute the panel does not write itself (e.g. an injected <img onerror=...>).
@@ -294,7 +373,7 @@ test('panel: Compact confirms first, then sends exactly one compact with the id 
   p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
   const row = rowHtml(p.html(), 'fx-0021');
   // the question and its reason on the line under the row; the row keeps its meta line, without the tag
-  assert.match(row, /<div class="cwhy"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
+  assert.match(row, /<div class="cwhy" data-key="why:fx-0021"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
   assert.match(row, /class="pv">Idle 12 min · Tidepool · Opus · 152k ctx · 1 hr 35 min</);
   assert.match(row, /data-do="compact-go" data-id="fx-0021">Compact<\/button>/);
   assert.match(row, /data-do="cancel" data-id="fx-0021">Cancel/);
@@ -516,4 +595,121 @@ test('panel: Compacted shows on the row once the context dropped after an accept
   p.document.querySelector('[data-do="compact-go"][data-id="fx-0022"]').click();
   p.window.kadans.render({ agents: F.compact.agents.filter((a) => a.id !== 'fx-0022') });
   assert.doesNotMatch(p.html(), /Compacted/);
+});
+
+// ---------- k14: keyed patch, leave fade, stale reading ----------
+// A panel on the blobs fixture with motion allowed (the first 300 ms after the first paint never animate).
+function livePanel() {
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.blobs);
+  clock.now += 1000;
+  timers.length = 0;
+  p.log.length = 0;
+  const data = () => JSON.parse(JSON.stringify({ status: F.blobs.status, agents: F.blobs.agents }));
+  return { p, clock, timers, data };
+}
+
+test('panel: a refresh with unchanged data touches no node at all', () => {
+  const { p, data } = livePanel();
+  const before = p.html();
+  const row = p.el.find('row:fx-0001');
+  p.window.kadans.render(data());
+  p.window.kadans.render(data());
+  assert.deepEqual(p.log, []);
+  assert.equal(p.el.find('row:fx-0001'), row);
+  assert.equal(p.html(), before);
+});
+
+test('panel: a changed row is patched alone; every other row node is left as it was', () => {
+  const { p, data } = livePanel();
+  const nodes = Object.fromEntries(['row:fx-0004', 'row:fx-0001', 'row:fx-0002', 'row:fx-0006', 'grp'].map((k) => [k, p.el.find(k)]));
+  const d = data();
+  d.agents.find((a) => a.id === 'fx-0002').status = 'working'; // needs-you -> working: new face, meta line and actions
+  p.window.kadans.render(d);
+  const touched = new Set(p.log.map(([, k]) => k));
+  // the row element itself stays (hover and focus with it); its blob, text and actions were replaced inside it
+  assert.equal(p.el.find('row:fx-0002'), nodes['row:fx-0002']);
+  assert.ok(p.log.some(([op]) => op === 'replace'));
+  for (const k of ['row:fx-0004', 'row:fx-0001', 'row:fx-0006', 'grp']) {
+    assert.equal(p.el.find(k), nodes[k], `${k} kept`);
+    assert.ok(!touched.has(k), `${k} untouched`);
+  }
+  assert.doesNotMatch(p.html(), /Needs you/);
+  // a new agent row is inserted (and rises in); the others stay
+  const d2 = data();
+  d2.agents.splice(1, 0, p.window.KF.agent('fx-0030', { title: 'A new one', startedAt: p.window.KF.N - 60000 }));
+  p.log.length = 0;
+  p.window.kadans.render(d2);
+  assert.match(p.el.find('row:fx-0030').getAttribute('class'), /\benter\b/);
+  assert.equal(p.el.find('row:fx-0004'), nodes['row:fx-0004']);
+});
+
+test('panel: an open confirm, the hover mark and runtime classes survive a refresh that changes the row', () => {
+  const { p, clock, data } = livePanel();
+  p.document.querySelector('[data-do="confirm"][data-id="fx-0001"]').click();
+  const row = p.el.find('row:fx-0001');
+  assert.match(row.getAttribute('class'), /\bhov\b/);
+  row.classList.add('poke'); // a squish in progress
+  clock.now += 2000;
+  const d = data();
+  d.status.now += 60_000; // a minute later: durations and the gauge move
+  d.status.accounts[0].limits[0].pct += 3;
+  p.window.kadans.render(d);
+  assert.equal(p.el.find('row:fx-0001'), row);
+  assert.match(row.getAttribute('class'), /\bhov\b/);
+  assert.match(row.getAttribute('class'), /\bpoke\b/);
+  assert.match(p.html(), /data-do="stop" data-id="fx-0001">Stop<\/button>/);
+  // the gauge fill keeps its node and only its transform changes, so the CSS transition carries it
+  assert.ok(p.log.some(([op, k, a]) => op === 'attr' && k === 'div' && a === 'style'));
+  assert.match(p.html(), /class="fill" style="transform:translateX\(-39%\)"/);
+});
+
+test('panel: a row a refresh removes fades out, then goes; with the popover closed it goes at once', () => {
+  const { p, timers, data } = livePanel();
+  const d = data();
+  d.agents = d.agents.filter((a) => a.id !== 'fx-0002');
+  p.window.kadans.render(d);
+  const ghost = p.el.kids[0].kids.find((k) => k.attrs.get('id') === 'k-list').kids.find((k) => /\bleave\b/.test(k.attrs.get('class') ?? ''));
+  assert.ok(ghost, 'the removed row is still there, fading');
+  assert.equal(ghost.attrs.get('data-key'), undefined, 'out of focus restore and blinks');
+  assert.equal(p.el.find('row:fx-0002'), null);
+  timers.filter((t) => t.ms === 150).forEach((t) => t.fn());
+  assert.equal(ghost.parentNode, null);
+  // closed popover: no motion, the row is removed right away
+  p.window.kadans.visible(false);
+  const d2 = data();
+  d2.agents = d2.agents.filter((a) => a.id !== 'fx-0002' && a.id !== 'fx-0006');
+  p.window.kadans.render(d2);
+  assert.ok(!/\bleave\b/.test(p.html()));
+  assert.doesNotMatch(p.html(), /Draft release notes/);
+});
+
+test('panel: a reading older than 10 min shows its age in the muted note instead of pace advice', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const { N, M } = p.window.KF;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.stale);
+  let html = p.html();
+  assert.match(html, /<div class="note stale"><i class="dot-gray"><\/i><span>Last reading 37 min ago<\/span><\/div>/);
+  assert.doesNotMatch(html, /On pace/);
+  assert.doesNotMatch(html, /title="Pace /);
+  // 9 min old: still fresh, the advice is back
+  p.window.kadans.render({ status: p.window.KF.status({ accounts: [p.window.KF.acct({ lastSample: N - 9 * M })] }) });
+  html = p.html();
+  assert.match(html, /On pace/);
+  assert.doesNotMatch(html, /Last reading/);
+  // a stale brake is not advice either
+  p.window.kadans.render({ status: p.window.KF.status({ accounts: [p.window.KF.acct({ lastSample: N - 90 * M, state: 'brake' })] }) });
+  assert.match(p.html(), /Last reading 1 hr 30 min ago/);
+  assert.doesNotMatch(p.html(), /run out/);
+  // k13's per-account flag wins when it is there
+  p.window.kadans.render({ status: p.window.KF.status({ accounts: [p.window.KF.acct({ lastSample: N - 40 * M, fresh: true })] }) });
+  assert.doesNotMatch(p.html(), /Last reading/);
+  p.window.kadans.render({ status: p.window.KF.status({ accounts: [p.window.KF.acct({ lastSample: N - 2 * M, fresh: false })] }) });
+  assert.match(p.html(), /Last reading 2 min ago/);
 });

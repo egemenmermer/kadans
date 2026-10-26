@@ -1,8 +1,10 @@
 # Security and privacy
 
-Kadans runs on your Mac only. It has no server, makes no network calls of its own, and needs no account or API key.
-To check: `grep -rnE "https?://|fetch\(|XMLHttpRequest" lib bin app/web` finds no request code. The one exception is
-kickoff (below, off by default): it runs the `claude` command, which talks to Anthropic as usual.
+Kadans runs on your Mac only. It has no server and needs no account or API key. It makes one kind of network call of
+its own: the fresh usage reading below (one GET to `https://api.anthropic.com/api/oauth/usage`, on by default, off with
+`kadans config set usageApi false`). To check: `grep -rnE "https?://|fetch\(|XMLHttpRequest" lib bin app/web` finds only
+`lib/usage-api.mjs`. The other exception is kickoff (below, off by default): it runs the `claude` command, which talks to
+Anthropic as usual.
 
 ## What it reads
 
@@ -21,6 +23,10 @@ kickoff (below, off by default): it runs the `claude` command, which talks to An
   open: only `pid`, `sessionId`, `procStart` and `kind` are read; the `*.key` files next to them (peer tokens) are never opened.
 - `~/.claude/settings.json` (or the folder in `CLAUDE_CONFIG_DIR`), when you run `install` or `uninstall`.
 
+- The macOS Keychain item `Claude Code-credentials` (your own `~/.claude` account; Claude Code keeps other config dirs
+  under other items, which Kadans never reads), through `/usr/bin/security find-generic-password` with an argument list,
+  for the fresh usage reading below. Only the access token and its expiry are used.
+
 ## What it writes
 
 - `~/.kadans/` (or `KADANS_HOME`): usage samples (kept 8 days), the session event log (kept 2 days), a transcript scan
@@ -31,9 +37,29 @@ kickoff (below, off by default): it runs the `claude` command, which talks to An
 - A one-shot script in `~/.kadans/run/`, only when you press Start or Replace for a task you approved. It opens a
   new Claude Code session in Terminal.app or an Orca worktree and deletes itself.
 - macOS notifications through `osascript`, only if you set `"notify": true` in `config.json`.
+- `~/.kadans/usage-api.json`: time of the last usage reading attempt and success, the failure count, the next allowed
+  time and a short error code (such as `http_429`). Never a token.
 - `~/.kadans/kickoff.json` (time and result of the last kickoff) and one `Kickoff` line in the event log per kickoff.
 - `~/Library/LaunchAgents/dev.kadans.kickoff.plist`, only with `kadans kickoff schedule --apply` (removed by
   `kadans kickoff unschedule --apply`). The app never writes it.
+
+## Fresh usage reading (on by default)
+
+The status line only brings a usage sample when a Claude Code chat on this Mac makes a model call. Usage from claude.ai,
+the desktop or phone app or another computer would go unseen, so the app runs `kadans usage fetch` every 2 minutes (and
+when you open it and the last reading is over a minute old). It reads the same numbers Claude Code's `/usage` shows:
+
+1. Reads the `Claude Code-credentials` Keychain item (your own account only). The first time, macOS may ask whether to
+   allow it.
+2. If the access token is missing or expires within a minute, it stops there: "login needs a Claude Code session". It
+   never uses the refresh token, because refreshing rotates it and could log Claude Code out.
+3. Otherwise it sends one `GET https://api.anthropic.com/api/oauth/usage` (redirects refused, 10 s timeout) and stores the
+   5-hour and 7-day percentages and reset times as a normal sample marked `source: "api"`.
+
+Token rules: the access token lives in memory for that one request. It is never written to disk, logged, printed, put
+in an error message, passed on a command line or in an environment variable, or sent anywhere but api.anthropic.com.
+A 401, 403, 429, 5xx or timeout stores no sample and backs off (2, 4, 8, 16, then 30 minutes, or longer if the server
+says so); there is never more than one request a minute. Turn it off with `kadans config set usageApi false`.
 
 ## Kickoff (off by default)
 

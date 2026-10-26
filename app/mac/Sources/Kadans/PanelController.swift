@@ -68,6 +68,9 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     var fixtureOnly = false
     /// Ids from the latest `agents --json`; a stop or compact request must name one of these.
     private var agentIds = Set<String>()
+    /// k14: the page's size reports are coalesced (one popover resize per burst) and repeats dropped.
+    private var pendingHeight: CGFloat?
+    private var lastHeight: CGFloat = 0
 
     var onLoaded: (() -> Void)?
     var onSize: ((CGFloat) -> Void)?
@@ -94,6 +97,35 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         wv.navigationDelegate = self
         webView = wv
         view = wv
+    }
+
+    // MARK: popover shown / closed
+
+    /// The page cannot rely on `document.hidden` for a closed NSPopover, so it is told: closed, the blob blink timer
+    /// stops and nothing animates. (The popover calls these on show and close; the snapshot window never does, and the
+    /// page starts out visible.)
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        if loaded { evaluate("window.kadans && window.kadans.visible && window.kadans.visible(true); true;") }
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        if loaded { evaluate("window.kadans && window.kadans.visible && window.kadans.visible(false); true;") }
+    }
+
+    /// One resize per burst of size reports (the page already waits for its own animations before it shrinks).
+    private func sizeFromPage(_ h: CGFloat) {
+        let first = pendingHeight == nil
+        pendingHeight = h
+        guard first else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            guard let h = self.pendingHeight else { return }
+            self.pendingHeight = nil
+            guard h != self.lastHeight else { return }
+            self.lastHeight = h
+            self.onSize?(h)
+        }
     }
 
     // MARK: first frame and fade
@@ -309,7 +341,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         case "size":
             // UI only: fit the popover to the page.
             guard let h = (body["height"] as? NSNumber)?.doubleValue, h.isFinite, h > 0 else { return }
-            onSize?(min(Self.maxHeight, max(60, ceil(CGFloat(h)))))
+            sizeFromPage(min(Self.maxHeight, max(60, ceil(CGFloat(h)))))
         case "close":
             onClose?()
         case "retry", "check-again", "settings":
