@@ -76,16 +76,46 @@
     idle: '<circle cx="13.9" cy="15.6" r="1.4"/><circle cx="19.3" cy="15.6" r="1.4"/>',
     done: `<path d="M11.4 16.4q1.8-1.8 3.6 0M17.2 16.4q1.8-1.8 3.6 0" stroke-width="1.6" ${LINE}/>`,
   };
+  // The face sits in its own group (class fc) so it can blink; the svg carries the face name (f-work…) for CSS.
   function avatar(shape, face, size = 30) {
     const s = SHAPES[shape];
     const body = `var(--blob-${shape})`;
     const edge = `var(--blob-${shape}-edge)`;
     const star = shape === 'star';
-    return `<svg class="av" width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true">` +
+    return `<svg class="av f-${face}" width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true">` +
       `<g style="fill:${edge}${star ? `;stroke:${edge}` : ''}" transform="translate(1.2 1.6)">${s}</g>` +
-      `<g style="fill:${body}${star ? `;stroke:${body}` : ''}">${s}</g><g style="fill:var(--ink)">${FACES[face]}</g></svg>`;
+      `<g style="fill:${body}${star ? `;stroke:${body}` : ''}">${s}</g><g class="fc" style="fill:var(--ink)">${FACES[face]}</g></svg>`;
   }
   const shapeOf = (id) => SHAPE_NAMES[hash(id) % SHAPE_NAMES.length];
+
+  // Distinct blobs: no two visible rows share a shape while a free one is left. Rows are ranked oldest first (startedAt,
+  // then id), so a newcomer never takes an older agent's blob; each row starts at its hash shape and, on a collision,
+  // takes the next free shape in SHAPE_NAMES order. Once all five are used, rows fall back to their hash shape.
+  // items: [{ id, startedAt?, rank? }]; lower rank first (the panel: 0 live rows, 1 their subagents, 2 the idle group's
+  // rows, 3 their subagents), so live rows never change blob when the idle group opens. Same input, same output.
+  function assignShapes(items) {
+    const t = (x) => (finite(x.startedAt) ? x.startedAt : Infinity);
+    const ranked = [...items].filter((x) => x && x.id != null)
+      .sort((a, b) => (a.rank || 0) - (b.rank || 0) || t(a) - t(b) || (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+    const used = new Set();
+    const out = new Map();
+    for (const x of ranked) {
+      if (out.has(String(x.id))) continue;
+      const pref = hash(x.id) % SHAPE_NAMES.length;
+      let pick = SHAPE_NAMES[pref];
+      if (used.size < SHAPE_NAMES.length) {
+        for (let i = 0; i < SHAPE_NAMES.length; i++) {
+          const name = SHAPE_NAMES[(pref + i) % SHAPE_NAMES.length];
+          if (!used.has(name)) { pick = name; break; }
+        }
+      }
+      used.add(pick);
+      out.set(String(x.id), pick);
+    }
+    return out;
+  }
+  let shapeMap = new Map();
+  const shapeFor = (id) => shapeMap.get(String(id)) ?? shapeOf(id);
 
   const IC = {
     pace: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 11a5 5 0 1 1 10 0"/><path d="M8 11 5.8 8"/></svg>',
@@ -94,6 +124,7 @@
     stop: '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="4.5" y="4.5" width="7" height="7" rx="1.8"/></svg>',
     open: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h6v6M12 4l-7.5 7.5"/></svg>',
     x: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
+    chev: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4l4 4-4 4"/></svg>',
     theme: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>',
     gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
   };
@@ -106,7 +137,35 @@
     dismissed: new Set(), scroll: 0, height: 0, data: null,
     // k4c: screen 'main' | 'settings' | 'review'; from: where Review was opened; pending config picks; apply flow flags.
     screen: 'main', from: 'main', pending: {}, uninstallOpen: false, applyConfirm: false, applying: false, applied: false,
-    applyFailed: false, dragging: false, deferred: false, lastHtml: '', sScroll: 0 };
+    applyFailed: false, dragging: false, deferred: false, lastHtml: '', sScroll: 0,
+    // k9a motion: seen = row key -> time it first showed (enter animation); gauge = last fill / tail per limit;
+    // firstAt = first paint (never animated); slide = settings push {dir, at}; once = one-shot classes for the next render;
+    // leaving = an exit animation is running. Close idle: closeAll = "Close N idle chats?" open; bulk = the run in progress.
+    seen: new Map(), gauge: new Map(), firstAt: 0, slide: null, once: new Set(), leaving: false, hoverKey: null, focusKey: null,
+    closeAll: false, closeTimer: null, bulk: null };
+
+  // ---------- motion (k9a) ----------
+  // Calm and short: 120-260 ms, transform and opacity only (the gauge fill may sweep its width). Nothing moves on the first
+  // paint, in the 300 ms after it (fixture `after` clicks, snapshots), with reduced motion, or while the page is hidden.
+  const ENTER_MS = 260;
+  const LEAVE_MS = 150;
+  const OUT_MS = 130;
+  const reduced = () => {
+    try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
+  };
+  const motionOk = () => !reduced() && !document.hidden && view.firstAt > 0 && Date.now() - view.firstAt > 300;
+  // Enter animation for a keyed element: only for a key not on screen in the last render. A re-render while it is still
+  // running keeps it going (negative delay) instead of jumping to the end; existing rows never re-animate.
+  let seenNext = null;
+  function enter(key) {
+    const now = Date.now();
+    let t = view.seen.get(key);
+    if (t === undefined) t = motionOk() ? now : -Infinity;
+    seenNext?.set(key, t);
+    const age = now - t;
+    if (!(age < ENTER_MS)) return ['', ''];
+    return [' enter', age > 0 ? ` style="--d:-${Math.round(age)}ms"` : ''];
+  }
 
   // ---------- gauge card ----------
   const LIMIT_NAME = { five_hour: '5-hour limit', seven_day: '7-day limit' };
@@ -118,6 +177,7 @@
     return left < DAY ? `Resets in ${dur(left)}` : `Resets ${dayTime(l.resetsAt)}`;
   }
 
+  let limTargets = [];
   function limitHtml(l, now, showTarget) {
     const pct = clamp(Math.round(finite(l.pct) ? l.pct : 0), 0, 100);
     const brakeLike = l.state === 'brake' || l.state === 'early';
@@ -128,6 +188,7 @@
     const mark = showTarget && finite(l.target)
       ? `<div class="mark" style="left:${clamp(l.target, 0, 100)}%" title="Target ${Math.round(l.target)}%"></div>` : '';
     const name = limitName(l.name);
+    limTargets.push({ key: `${view.account}|${limTargets.length}|${l.name}`, w: pct, tl: tail ? pct : null, tr: tail ? 100 - end : null });
     const pace = finite(l.needle) && finite(l.projection) && !l.ended
       ? `Pace ${l.needle.toFixed(2)} pts/min · about ${Math.round(l.projection)}% at the reset` : '';
     return `<div class="lim"><div class="lrow"><span class="k">${esc(name)}</span><span class="r">${esc(resetText(l, now))}</span>` +
@@ -268,12 +329,15 @@
     return (Array.isArray(queue?.next) ? queue.next : []).filter((t) => t && t.approved === true);
   }
 
+  const canStopAgent = (a) => finite(a.pid) || (Boolean(a.orca?.terminal) && !a.orca?.ambiguous);
+
   function actsHtml(a, st, tasks) {
     const id = a.id;
     if (view.confirm === id) {
       const replace = view.kind === 'replace';
-      return `<div class="acts" style="display:flex"><button class="sure${replace ? ' go' : ''}" data-do="${replace ? 'replace-go' : 'stop'}" ` +
-        `data-id="${esc(id)}">${replace ? 'Replace' : 'Stop'}</button>` +
+      const word = replace ? 'Replace' : view.kind === 'close' ? 'Close' : 'Stop';
+      return `<div class="acts on"><button class="sure${replace ? ' go' : ''}" data-do="${replace ? 'replace-go' : 'stop'}" ` +
+        `data-id="${esc(id)}">${word}</button>` +
         `<button class="pill" data-do="cancel" data-id="${esc(id)}">Cancel</button></div>`;
     }
     if (st === 'ended') return `<div class="acts">${btn('dismiss', id, IC.x, 'Dismiss')}</div>`;
@@ -284,15 +348,19 @@
     if (st === 'needs-you') first = btn('open', id, IC.open, 'Open in terminal');
     else if (st === 'slowed' || st === 'paused') first = btn('resume', id, IC.play, 'Resume', { disabled: !canPace, why: noPace });
     else first = btn('pace', id, IC.pace, 'Slow or pause', { disabled: !canPace, why: noPace, menu: true });
-    const canStop = finite(a.pid) || (Boolean(a.orca?.terminal) && !a.orca?.ambiguous);
+    const canStop = canStopAgent(a);
     const why = !canStop ? "Can't stop from here" : !tasks.length ? 'No approved task to start' : '';
-    return `<div class="acts"${view.picker === id || view.pacer === id ? ' style="display:flex"' : ''}>${first}` +
-      `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}` +
-      `${btn('confirm', id, IC.stop, 'Stop', { disabled: !canStop, why: "Can't stop from here" })}</div>`;
+    // An idle chat closes (same `stop` bridge action, its own confirm copy); everything else stops.
+    const last = st === 'idle'
+      ? btn('close', id, IC.x, 'Close chat', { disabled: !canStop, why: "Can't close from here" })
+      : btn('confirm', id, IC.stop, 'Stop', { disabled: !canStop, why: "Can't stop from here" });
+    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${first}` +
+      `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${last}</div>`;
   }
 
   function pickerHtml(a, tasks) {
-    return `<div class="pick" role="menu" aria-label="Replace with">` +
+    const [ec, es] = enter(`pick:${a.id}`);
+    return `<div class="pick${ec}"${es} role="menu" aria-label="Replace with">` +
       `<div class="pick-h">Stop this agent and start</div>${tasks.map((t) =>
         `<button role="menuitem" data-do="pick" data-id="${esc(a.id)}" data-task="${esc(t.id)}" data-key="pick:${esc(a.id)}:${esc(t.id)}" title="${esc(t.text)}">` +
         `<span class="nm">${esc(t.text)}</span><span class="pv">${esc(t.project ?? '')}</span></button>`).join('')}</div>`;
@@ -303,7 +371,8 @@
     const item = (mode, until, name, hint) =>
       `<button role="menuitem" data-do="pace-set" data-id="${esc(a.id)}" data-mode="${mode}"${until ? ` data-until="${until}"` : ''} ` +
       `data-key="pace:${esc(a.id)}:${mode}:${until ?? ''}"><span class="nm">${esc(name)}</span><span class="pv">${esc(hint)}</span></button>`;
-    return `<div class="pick" role="menu" aria-label="Pace this agent"><div class="pick-h">Pace this agent</div>` +
+    const [ec, es] = enter(`pace:${a.id}`);
+    return `<div class="pick${ec}"${es} role="menu" aria-label="Pace this agent"><div class="pick-h">Pace this agent</div>` +
       item('slow', null, 'Slow down', `Waits ${slowS} s before each tool call`) +
       item('pause', 'reset', 'Pause until reset', finite(resetAt) ? `Holds before its next tool · ${hhmm(resetAt)}` : 'Holds before its next tool') +
       item('pause', '30m', 'Pause for 30 min', 'Then it carries on') + '</div>';
@@ -324,12 +393,15 @@
       let [pre, preText] = prefixOf(st, a, now);
       const swap = view.confirm === a.id && view.kind === 'replace' ? tasks.find((t) => String(t.id) === String(view.task)) : null;
       if (swap) [pre, preText] = [`Replace with: ${esc(swap.text)}`, `Replace with: ${swap.text}. `];
+      const ask = view.confirm === a.id && view.kind === 'close';
+      if (ask) [pre, preText] = ['<span class="ask">Close this chat?</span>', 'Close this chat? '];
       const parts = [a.project, st === 'ended' ? null : family(a.model), tokens(a.tokens),
         st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt)].filter(Boolean).map(String);
-      const line = swap ? '' : parts.join(' · ');
-      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}`;
-      html += `<div class="${cls}" tabindex="0" data-key="row:${esc(a.id)}" title="${esc(title)}" aria-label="${esc(`${title}. ${preText}${line}`)}">` +
-        `${avatar(shapeOf(a.id), FACE[st])}<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${pre}${esc(line)}</div></div>` +
+      const line = swap || ask ? '' : parts.join(' · ');
+      const [ec, es] = enter(`row:${a.id}`);
+      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}${ec}`;
+      html += `<div class="${cls}"${es} tabindex="0" data-key="row:${esc(a.id)}" title="${esc(title)}" aria-label="${esc(`${title}. ${preText}${line}`)}">` +
+        `${avatar(shapeFor(a.id), FACE[st])}<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${pre}${esc(line)}</div></div>` +
         `${actsHtml(a, st, tasks)}</div>`;
       if (view.picker === a.id) html += pickerHtml(a, tasks);
       if (view.pacer === a.id) {
@@ -341,8 +413,9 @@
       for (const s of Array.isArray(a.subagents) ? a.subagents : []) {
         if (s.status !== 'running') continue;
         const name = s.description || s.type || 'Subagent';
-        html += `<div class="row child" tabindex="0" data-key="sub:${esc(s.id)}" title="${esc(name)}" aria-label="${esc(`Subagent: ${name}`)}">` +
-          `${avatar(shapeOf(s.id), 'work', 22)}<div class="tx"><div class="nm">${esc(name)}</div></div></div>`;
+        const [sc, ss] = enter(`sub:${s.id}`);
+        html += `<div class="row child${sc}"${ss} tabindex="0" data-key="sub:${esc(s.id)}" title="${esc(name)}" aria-label="${esc(`Subagent: ${name}`)}">` +
+          `${avatar(shapeFor(s.id), 'work', 22)}<div class="tx"><div class="nm">${esc(name)}</div></div></div>`;
       }
     }
     return html;
@@ -650,27 +723,25 @@
     view.lastHtml = '';
     const status = view.data.status ?? null;
     const now = finite(status?.now) ? status.now : Date.now();
+    limTargets = [];
     const g = gauge(status, now);
-    const all = agentList(view.data.agents).filter((a) => a && a.id != null && !view.dismissed.has(a.id))
-      .filter((a) => a.status !== 'ended' || !finite(a.lastSeen) || now - a.lastSeen < ENDED_KEEP_MS);
+    const { all, old, live } = split(now);
     const tasks = startable(status?.queue);
     if (view.confirm && !all.some((a) => a.id === view.confirm)) view.confirm = null;
     if (view.confirm && view.kind === 'replace' && !tasks.some((t) => String(t.id) === String(view.task))) view.confirm = null;
     if (view.picker && (!all.some((a) => a.id === view.picker) || !tasks.length)) view.picker = null;
     if (view.pacer && !all.some((a) => a.id === view.pacer && ['working', 'idle'].includes(rowState(a)))) view.pacer = null;
-    // Agents quiet for 2+ hours fold into one "N idle" row at the end.
-    const old = all.filter((a) => a.stale === true || (a.status === 'idle' && finite(a.lastSeen) && now - a.lastSeen > STALE_MS));
-    const live = all.filter((a) => !old.includes(a));
+    if (!old.length) view.closeAll = false;
+    const subs = (a, rank) => (rowState(a) === 'ended' || !Array.isArray(a.subagents) ? []
+      : a.subagents.filter((x) => x && x.status === 'running').map((x) => ({ id: x.id, startedAt: x.startedAt, rank })));
+    shapeMap = assignShapes([...live.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 0 })), ...live.flatMap((a) => subs(a, 1)),
+      ...old.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 2 })), ...old.flatMap((a) => subs(a, 3))]);
 
+    seenNext = new Map();
     let html = g.html;
     if (g.mode !== 'no_claude') {
       html += `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>`;
-      const group = old.length
-        ? `<button class="row grp" data-do="idle" data-key="idle-group" aria-expanded="${view.idleOpen}">` +
-          `${avatar('egg', 'idle', 22)}<span class="tx"><span class="nm">${old.length} idle</span>` +
-          `<span class="pv">Quiet for 2+ hours</span></span><span class="chev" aria-hidden="true">${view.idleOpen ? '−' : '+'}</span></button>` +
-          (view.idleOpen ? agentRows(old, now, tasks) : '')
-        : '';
+      const group = old.length ? groupHtml(old, now) + (view.idleOpen ? agentRows(old, now, tasks) : '') : '';
       html += all.length
         ? `<div class="list" id="k-list">${agentRows(live, now, tasks)}${group}</div>`
         : `<div class="empty">${avatar('egg', 'idle')}<div><div class="nm">No agents running</div>` +
@@ -684,17 +755,209 @@
     const focusKey = keyOf(document.activeElement);
     const oldList = document.getElementById('k-list');
     if (oldList) view.scroll = oldList.scrollTop;
-    el.innerHTML = `<div class="panel" role="dialog" aria-label="Kadans">${html}</div>`;
+    const [pc, ps] = slideIn('back');
+    el.innerHTML = `<div class="panel${pc}"${ps} role="dialog" aria-label="Kadans">${html}</div>`;
+    view.seen = seenNext;
+    seenNext = null;
+    view.once.clear();
     const list = document.getElementById('k-list');
     if (list) {
       list.scrollTop = view.scroll;
       fade(list);
     }
+    sweepGauge(el);
     if (view.focusPick) {
       view.focusPick = false;
       el.querySelector('.pick [data-do="pick"], .pick [data-do="pace-set"]')?.focus();
     } else if (focusKey) restoreFocus(el, focusKey);
+    if (!view.firstAt) view.firstAt = Date.now();
     reportSize();
+    scheduleBlinks();
+  }
+
+  // all: rows the panel shows; old: idle chats quiet for 2+ hours, folded into the "N idle" group at the end; live: the rest.
+  function split(now) {
+    const all = agentList(view.data?.agents).filter((a) => a && a.id != null && !view.dismissed.has(a.id))
+      .filter((a) => a.status !== 'ended' || !finite(a.lastSeen) || now - a.lastSeen < ENDED_KEEP_MS);
+    const old = all.filter((a) => rowState(a) === 'idle' &&
+      (a.stale === true || (finite(a.lastSeen) && now - a.lastSeen > STALE_MS)));
+    return { all, old, live: all.filter((a) => !old.includes(a)) };
+  }
+
+  // ---------- close idle chats (k9a) ----------
+  // "Close all" exists only on the 2+ hour idle group, and only for chats Kadans can stop. One confirm, then one `stop`
+  // per id in list order (BULK_GAP_MS apart, so the progress shows and the CLI runs one at a time). A chat counts as
+  // closed once its row is ended or gone; whatever is still there BULK_WAIT_MS after the last send "didn't close".
+  const BULK_GAP_MS = 400;
+  const BULK_WAIT_MS = 15_000;
+  const BULK_KEEP_MS = 8000;
+
+  function bulkState() {
+    const b = view.bulk;
+    if (!b) return null;
+    const byId = new Map(agentList(view.data?.agents).filter((a) => a && a.id != null).map((a) => [a.id, a]));
+    const closed = b.ids.filter((id) => !byId.has(id) || rowState(byId.get(id)) === 'ended').length;
+    const n = b.ids.length;
+    const now = Date.now();
+    const done = b.sent >= n && (closed === n || now >= b.deadline);
+    if (done && !b.doneAt) {
+      b.doneAt = now;
+      setTimeout(() => render({}), BULK_KEEP_MS + 50);
+    }
+    if (done && now - b.doneAt >= BULK_KEEP_MS) {
+      view.bulk = null;
+      return null;
+    }
+    return { n, closed, sent: b.sent, done };
+  }
+
+  function groupHtml(old, now) {
+    const n = old.length;
+    const closable = old.filter(canStopAgent).length;
+    const bs = bulkState();
+    let line = 'Quiet for 2+ hours';
+    let right = '';
+    if (view.closeAll && closable) {
+      line = `<span class="ask">Close ${plural(closable, 'idle chat', 'idle chats')}?</span>`;
+      right = '<div class="acts on"><button class="sure" data-do="close-all-go">Close</button>' +
+        '<button class="pill" data-do="close-all-cancel">Cancel</button></div>';
+    } else if (bs) {
+      if (bs.sent < bs.n) line = `Closing ${bs.sent} of ${bs.n}…`;
+      else if (!bs.done) line = `Closed ${bs.closed} of ${bs.n}…`;
+      else if (bs.closed === bs.n) line = `Closed ${plural(bs.n, 'chat', 'chats')}`;
+      else line = `Closed ${bs.closed} of ${bs.n} · <span class="warn">${bs.n - bs.closed} didn't close</span>`;
+    } else if (closable) {
+      right = `<button class="pill quiet" data-do="close-all" title="Close the ${plural(closable, 'chat', 'chats')} quiet for 2+ hours">Close all</button>`;
+    }
+    const [ec, es] = enter('grp');
+    return `<div class="row grp${ec}"${es} data-key="grp"><button class="grp-t" data-do="idle" data-key="idle-group" aria-expanded="${view.idleOpen}">` +
+      `${avatar('egg', 'idle', 22)}<span class="tx"><span class="nm">${n} idle</span><span class="pv">${line}</span></span>` +
+      `${view.closeAll && closable ? '' : `<span class="chev${view.once.has('chev') ? ' turn' : ''}" aria-hidden="true">${IC.chev}</span>`}</button>${right}</div>`;
+  }
+
+  // The chats Close all would close right now (worked out again when the owner confirms, not when the confirm opened).
+  function closableIdle() {
+    const status = view.data?.status ?? null;
+    const now = finite(status?.now) ? status.now : Date.now();
+    return split(now).old.filter(canStopAgent).map((a) => a.id);
+  }
+
+  function setCloseAll(on) {
+    clearTimeout(view.closeTimer);
+    view.closeAll = on;
+    if (on) view.closeTimer = setTimeout(() => { view.closeAll = false; render({}); }, CONFIRM_MS);
+  }
+
+  function closeAllGo() {
+    setCloseAll(false);
+    const ids = closableIdle();
+    if (!ids.length) return;
+    const b = { ids, sent: 0, deadline: Infinity, doneAt: null };
+    view.bulk = b;
+    const step = () => {
+      if (view.bulk !== b) return;
+      send({ action: 'stop', id: ids[b.sent] });
+      b.sent += 1;
+      if (b.sent < ids.length) setTimeout(step, BULK_GAP_MS);
+      else {
+        b.deadline = Date.now() + BULK_WAIT_MS;
+        setTimeout(() => render({}), BULK_WAIT_MS + 50);
+      }
+      render({});
+    };
+    step();
+  }
+
+  // ---------- motion helpers that touch the DOM ----------
+  // Panel-level push: 'in' for Settings / Review, 'back' for the screen you return to. Survives a rebuild mid-way.
+  function slideIn(dir) {
+    const sl = view.slide;
+    if (!sl || sl.dir !== dir) return ['', ''];
+    const age = Date.now() - sl.at;
+    if (age >= ENTER_MS) {
+      view.slide = null;
+      return ['', ''];
+    }
+    return [` ${dir}`, age > 0 ? ` style="--d:-${Math.round(age)}ms"` : ''];
+  }
+
+  // Gauge: the new markup carries the new width; put the old one back, flush styles, then set the new one so the CSS
+  // transition runs. A forced reflow, not requestAnimationFrame (that never fires in the offscreen snapshot window).
+  function sweepGauge(el) {
+    const prev = view.gauge;
+    const nodes = el.querySelectorAll('.lim');
+    const moves = [];
+    view.gauge = new Map(limTargets.map((t) => [t.key, t]));
+    if (!motionOk()) return;
+    limTargets.forEach((t, i) => {
+      const p = prev.get(t.key);
+      const node = nodes[i];
+      if (!p || !node) return;
+      const fill = node.querySelector('.fill');
+      const tail = node.querySelector('.ahead');
+      if (fill && p.w !== t.w) {
+        fill.style.width = `${p.w}%`;
+        moves.push(() => { fill.style.width = `${t.w}%`; });
+      }
+      if (tail && p.tl !== null && (p.tl !== t.tl || p.tr !== t.tr)) {
+        tail.style.left = `${p.tl}%`;
+        tail.style.right = `${p.tr}%`;
+        moves.push(() => { tail.style.left = `${t.tl}%`; tail.style.right = `${t.tr}%`; });
+      }
+    });
+    if (!moves.length) return;
+    void el.offsetWidth;
+    moves.forEach((f) => f());
+  }
+
+  // Blobs: a small squish and blink when the pointer or focus reaches a row (once per arrival, not per re-render).
+  function poke(av) {
+    if (!av || !motionOk() || av.closest?.('.ended')) return;
+    av.classList.remove('poke');
+    void av.getBoundingClientRect();
+    av.classList.add('poke');
+    setTimeout(() => av.classList.remove('poke'), 420);
+  }
+  let restoring = false;
+  function onArrive(e) {
+    if (restoring) return;
+    const row = e.target?.closest?.('.row[data-key]') ?? null;
+    const key = row ? row.dataset.key : null;
+    const which = e.type === 'focusin' ? 'focusKey' : 'hoverKey';
+    if (key === view[which]) return;
+    view[which] = key;
+    if (row) poke(row.querySelector('.av'));
+  }
+
+  // Working agents blink now and then: each row gets its own random 4-9 s, all driven by one shared timer that is off
+  // when nothing works, with reduced motion, on the settings screens and while the page is hidden.
+  const blinks = { due: new Map(), timer: null };
+  const nextBlink = (now) => now + 4000 + Math.random() * 5000;
+  function workingBlobs() {
+    return [...root().querySelectorAll('.row[data-key] > .av.f-work')].map((av) => [av.parentElement.dataset.key, av]);
+  }
+  function scheduleBlinks() {
+    clearTimeout(blinks.timer);
+    blinks.timer = null;
+    if (view.screen !== 'main' || reduced() || document.hidden) return;
+    const now = Date.now();
+    const due = new Map();
+    for (const [key] of workingBlobs()) due.set(key, blinks.due.get(key) ?? nextBlink(now));
+    blinks.due = due;
+    if (!due.size) return;
+    blinks.timer = setTimeout(blinkDue, Math.max(50, Math.min(...due.values()) - now));
+  }
+  function blinkDue() {
+    blinks.timer = null;
+    const now = Date.now();
+    for (const [key, av] of workingBlobs()) {
+      if ((blinks.due.get(key) ?? Infinity) > now + 30) continue;
+      blinks.due.set(key, nextBlink(now));
+      if (av.classList.contains('poke')) continue;
+      av.classList.add('blink');
+      setTimeout(() => av.classList.remove('blink'), 220);
+    }
+    scheduleBlinks();
   }
 
   // Settings and Review: rebuilt only when their markup changes, and never while a slider is held (the 5 s
@@ -712,14 +975,18 @@
     if (old && view.lastHtml) view.sScroll = old.scrollTop;
     view.lastHtml = inner;
     const label = view.screen === 'review' ? 'Hooks in Claude Code' : 'Kadans settings';
-    el.innerHTML = `<div class="panel screen${view.screen === 'settings' ? ' tall' : ''}" role="dialog" aria-label="${label}">${inner}</div>`;
+    const [pc, ps] = view.slide?.dir === 'in' ? slideIn('in') : slideIn('back');
+    el.innerHTML = `<div class="panel screen${view.screen === 'settings' ? ' tall' : ''}${pc}"${ps} role="dialog" aria-label="${label}">${inner}</div>`;
+    scheduleBlinks();
     const body = document.getElementById('k-sbody');
     if (body) body.scrollTop = view.sScroll;
     if (focusKey) restoreFocus(el, focusKey);
     reportSize();
   }
 
-  function go(screen) {
+  // dir: 'in' (Settings, Review) or 'back' (the screen you return to).
+  function go(screen, dir = 'in') {
+    view.slide = motionOk() ? { dir, at: Date.now() } : null;
     view.screen = screen;
     view.lastHtml = '';
     view.sScroll = 0;
@@ -742,13 +1009,15 @@
     const id = rest.join(':');
     const find = (k) => [...el.querySelectorAll('[data-key],[data-do]')].find((n) => keyOf(n) === k);
     let target = find(key);
-    if (!target && action === 'confirm') target = find(`stop:${id}`); // confirm swapped in Stop + Cancel
+    if (!target && (action === 'confirm' || action === 'close')) target = find(`stop:${id}`); // confirm swapped in Stop + Cancel
     if (!target && action === 'pick') target = find(`replace-go:${id.slice(0, id.lastIndexOf(':'))}`);
     if (!target && (action === 'stop' || action === 'cancel' || action === 'replace-go')) {
-      target = find(`confirm:${id}`) ?? find(`replace:${id}`) ?? find(`row:${id}`);
+      target = find(`confirm:${id}`) ?? find(`close:${id}`) ?? find(`replace:${id}`) ?? find(`row:${id}`);
     }
+    if (!target && action.startsWith('close-all')) target = find('close-all-go:') ?? find('close-all:') ?? find('idle-group');
     if (!target && action !== 'row') target = find(`row:${id}`);
-    target?.focus();
+    restoring = true;
+    try { target?.focus(); } finally { restoring = false; }
   }
 
   function fade(list) {
@@ -800,6 +1069,10 @@
     const numId = id != null && /^\d+$/.test(id) ? Number(id) : id;
     switch (b.dataset.do) {
       case 'confirm': view.picker = null; view.pacer = null; setConfirm(id); break;
+      case 'close': view.picker = null; view.pacer = null; setConfirm(id, 'close'); break;
+      case 'close-all': setConfirm(null); setCloseAll(true); break;
+      case 'close-all-cancel': setCloseAll(false); break;
+      case 'close-all-go': closeAllGo(); return;
       case 'cancel': setConfirm(null); break;
       case 'stop': setConfirm(null); send({ action: 'stop', id }); break;
       case 'replace':
@@ -829,9 +1102,32 @@
         if (Number.isInteger(task)) send({ action: 'replace', id, task });
         break;
       }
-      case 'idle': view.idleOpen = !view.idleOpen; break;
+      case 'idle': {
+        if (view.leaving) return;
+        if (view.idleOpen && motionOk() && b.closest) {
+          // Collapse: the group's rows fade out and the chevron turns back, then the list closes.
+          b.setAttribute('aria-expanded', 'false');
+          for (let n = b.closest('.row.grp')?.nextElementSibling; n; n = n.nextElementSibling) n.classList.add('leave');
+          view.leaving = true;
+          setTimeout(() => { view.leaving = false; view.idleOpen = false; render({}); }, LEAVE_MS);
+          return;
+        }
+        view.idleOpen = !view.idleOpen;
+        if (view.idleOpen && motionOk()) view.once.add('chev');
+        break;
+      }
       case 'open': send({ action: 'open', id }); return;
-      case 'dismiss': view.dismissed.add(id); send({ action: 'dismiss', id }); break;
+      case 'dismiss': {
+        view.dismissed.add(id);
+        send({ action: 'dismiss', id });
+        const row = b.closest?.('.row');
+        if (row && motionOk()) {
+          row.classList.add('leave');
+          setTimeout(() => render({}), LEAVE_MS);
+          return;
+        }
+        break;
+      }
       case 'start': case 'approve': send({ action: b.dataset.do, id: numId }); return;
       case 'account': view.account = id; send({ action: 'account', id }); break;
       case 'autopace': send({ action: 'autopace', on: b.getAttribute('aria-checked') !== 'true' }); return;
@@ -849,8 +1145,17 @@
   // Settings / Review buttons. Returns true when handled.
   function onScreenClick(b) {
     const back = (screen) => {
-      go(screen);
-      root().querySelector(screen === 'main' ? '[data-do="settings"]' : '[data-do="review"]')?.focus();
+      const land = () => {
+        go(screen, 'back');
+        root().querySelector(screen === 'main' ? '[data-do="settings"]' : '[data-do="review"]')?.focus();
+      };
+      const panel = root().firstElementChild;
+      if (view.leaving) return;
+      if (!panel || !motionOk()) return land();
+      // The screen slides back out to the right, then the one underneath comes back in.
+      panel.classList.add('out');
+      view.leaving = true;
+      setTimeout(() => { view.leaving = false; land(); }, OUT_MS);
     };
     switch (b.dataset.do) {
       case 'settings': go('settings'); send({ action: 'settings' }); root().querySelector('[data-do="back"]')?.focus(); return true;
@@ -927,7 +1232,11 @@
       } else onScreenClick({ dataset: { do: 'back' } });
       return;
     }
-    if (view.pacer) {
+    if (view.closeAll) {
+      setCloseAll(false);
+      render({});
+      root().querySelector('[data-do="close-all"]')?.focus();
+    } else if (view.pacer) {
       const id = view.pacer;
       view.pacer = null;
       render(view.data);
@@ -955,6 +1264,10 @@
     document.addEventListener('pointercancel', onPointer);
     el.addEventListener('scroll', (e) => { if (e.target.id === 'k-list') fade(e.target); }, true);
     document.addEventListener('keydown', onKey);
+    el.addEventListener('mouseover', onArrive);
+    el.addEventListener('focusin', onArrive);
+    el.addEventListener('mouseleave', () => { view.hoverKey = null; });
+    document.addEventListener('visibilitychange', scheduleBlinks);
   }
 
   // dev.html only: start a fixture from a clean slate (render keeps keys a payload leaves out).
@@ -963,8 +1276,15 @@
     view.pending = {};
     view.screen = 'main';
     view.lastHtml = '';
+    view.seen = new Map();
+    view.gauge = new Map();
+    view.firstAt = 0;
+    view.slide = null;
+    view.closeAll = false;
+    view.bulk = null;
+    view.idleOpen = false;
   }
-  window.kadans = { version: 1, render, send, reset };
+  window.kadans = { version: 1, render, send, reset, assignShapes };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();

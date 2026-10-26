@@ -6,6 +6,7 @@
   --panel: #ffffff;
   --card: #f5f5f7;
   --hover: #f2f2f4;
+  --sel: #ececef;
   --line: rgba(0,0,0,.06);
   --label: #1d1d1f;
   --label2: #737378;
@@ -47,11 +48,15 @@
   --shadow-knob: 0 1px 2px rgba(0,0,0,.25);
   --shadow-blue: 0 1px 2px rgba(47,111,240,.35);
   --focus: 0 0 0 3px rgba(74,140,247,.45);
+
+  /* Motion (k9a): short, ease-out, transform and opacity only. */
+  --ease-out: cubic-bezier(.2,.9,.25,1);
+  --ease-sw: cubic-bezier(.3,.8,.2,1);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --line: rgba(255,255,255,.07);
+    --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --sel: #323236; --line: rgba(255,255,255,.07);
     --label: #f2f2f4; --label2: #9a9aa0; --label3: #6a6a70; --track: #3a3a3f; --pill: #2e2e32;
     --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80;
     --shadow-panel: 0 0 0 .5px rgba(255,255,255,.08), 0 12px 40px rgba(0,0,0,.5);
@@ -59,7 +64,7 @@
   }
 }
 :root[data-theme="dark"] {
-  --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --line: rgba(255,255,255,.07);
+  --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --sel: #323236; --line: rgba(255,255,255,.07);
   --label: #f2f2f4; --label2: #9a9aa0; --label3: #6a6a70; --track: #3a3a3f; --pill: #2e2e32;
   --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80;
   --shadow-panel: 0 0 0 .5px rgba(255,255,255,.08), 0 12px 40px rgba(0,0,0,.5);
@@ -87,8 +92,9 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .lrow .r { margin-left: auto; color: var(--label2); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .lrow .p { font-weight: 600; font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
 .track { position: relative; height: 6px; border-radius: var(--r-track); background: var(--track); margin-top: 8px; overflow: hidden; }
-.fill { position: absolute; inset: 0 auto 0 0; border-radius: var(--r-track); background: linear-gradient(90deg, var(--blue), var(--blue2)); }
-.ahead { position: absolute; top: 0; bottom: 0; border-radius: 0 var(--r-track) var(--r-track) 0; }
+.fill { position: absolute; inset: 0 auto 0 0; border-radius: var(--r-track); background: linear-gradient(90deg, var(--blue), var(--blue2));
+  transition: width .4s var(--ease-sw); }
+.ahead { position: absolute; top: 0; bottom: 0; border-radius: 0 var(--r-track) var(--r-track) 0; transition: left .4s var(--ease-sw), right .4s var(--ease-sw); }
 .ahead.orange { background: var(--soft-orange); }
 .ahead.blue { background: var(--soft-blue); }
 .mark { position: absolute; top: -2px; bottom: -2px; width: 1.5px; background: var(--label3); }
@@ -114,7 +120,8 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .list.scroll { -webkit-mask-image: linear-gradient(180deg, #000 85%, transparent); mask-image: linear-gradient(180deg, #000 85%, transparent); }
 .list.scroll.end { -webkit-mask-image: none; mask-image: none; }
 .row { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--r-row); min-height: 44px; }
-.row:hover, .row.hov { background: var(--hover); }
+.row { transition: background-color .12s ease-out; }
+.row:hover, .row.hov, .row:focus-within { background: var(--hover); }
 .av { width: 30px; height: 30px; flex: none; }
 .tx { min-width: 0; flex: 1; }
 .nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -126,11 +133,17 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .child .nm { font-weight: 400; color: var(--label2); font-size: 12px; }
 .row.ended .av { filter: grayscale(1); opacity: .55; }
 .row.ended .nm { color: var(--label2); font-weight: 400; }
-.acts { display: none; gap: 4px; flex: none; }
-.row:hover .acts, .row:focus-within .acts, .row.hov .acts { display: flex; }
+/* Hover actions sit over the end of the row (the title keeps its full width) and fade in; an open confirm or menu
+   puts them back in the flow, so the text ellipsises next to them. */
+.acts { position: absolute; top: 0; bottom: 0; right: 8px; display: flex; align-items: center; gap: 4px; padding-left: 22px;
+  background: linear-gradient(90deg, transparent, var(--hover) 20px); opacity: 0; visibility: hidden;
+  transition: opacity .15s ease-out, visibility 0s linear .15s; }
+.row:hover .acts, .row:focus-within .acts, .row.hov .acts { opacity: 1; visibility: visible; transition: opacity .15s ease-out, visibility 0s; }
+.acts.on { position: static; flex: none; padding: 0; background: none; opacity: 1; visibility: visible; transition: none; }
 .rb { width: 26px; height: 26px; border-radius: 50%; background: var(--panel); box-shadow: var(--shadow-rb);
-  display: grid; place-items: center; color: var(--label2); }
+  display: grid; place-items: center; color: var(--label2); transition: color .12s ease-out, transform .1s ease-out; }
 .rb:hover { color: var(--label); }
+.pv .ask { color: var(--label); font-weight: 500; }
 .rb svg { width: 13px; height: 13px; }
 .rb[aria-disabled="true"], .sw[aria-disabled="true"] { opacity: .4; }
 .rb[aria-disabled="true"]:hover { color: var(--label2); }
@@ -142,13 +155,21 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .pick button { display: flex; flex-direction: column; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; min-width: 0; }
 .pick button:hover { background: var(--hover); }
 .pick .nm, .pick .pv { display: block; max-width: 100%; }
-/* "N idle" group row */
-.row.grp { width: 100%; text-align: left; min-height: 36px; }
+/* "N idle" group row: the toggle fills the row; Close all (or its confirm) sits at the end. */
+.row.grp { min-height: 36px; padding: 0 8px 0 0; gap: 6px; }
+.grp-t { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; align-self: stretch; padding: 6px 0 6px 8px;
+  text-align: left; border-radius: var(--r-row); }
 .row.grp .av { width: 22px; height: 22px; margin: 0 4px; }
 .row.grp .nm, .row.grp .pv { display: block; }
 .row.grp .nm { font-weight: 400; color: var(--label2); }
-.chev { flex: none; width: 26px; text-align: center; color: var(--label2); font-size: 15px; }
-.pill { font-size: 12px; font-weight: 500; border-radius: var(--r-full); padding: 5px 12px; background: var(--pill); white-space: nowrap; flex: none; }
+.chev { flex: none; width: 26px; display: grid; place-items: center; color: var(--label2); }
+.chev svg { width: 13px; height: 13px; transition: transform .2s var(--ease-out); }
+[aria-expanded="true"] > .chev svg { transform: rotate(90deg); }
+.chev.turn svg { animation: k-turn .2s var(--ease-out); }
+.pill.quiet { background: none; color: var(--label2); padding: 4px 9px; transition: background-color .12s ease-out, color .12s ease-out, transform .1s ease-out; }
+.pill.quiet:hover { background: var(--pill); color: var(--label); }
+.pill { font-size: 12px; font-weight: 500; border-radius: var(--r-full); padding: 5px 12px; background: var(--pill); white-space: nowrap; flex: none;
+  transition: transform .1s ease-out; }
 .pill.blue { background: linear-gradient(180deg, var(--blue-top), var(--blue2)); color: var(--on-accent); box-shadow: var(--shadow-blue); }
 .empty { display: flex; gap: 10px; align-items: center; padding: 10px 8px 6px; }
 .empty .s { font-size: 12px; color: var(--label2); }
@@ -162,8 +183,14 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .sw[aria-checked="true"] { background: var(--blue); }
 .sw[aria-checked="true"]::after { transform: translateX(12px); }
 .bottom .sp { margin-left: auto; display: flex; gap: 6px; }
-.ic { width: 28px; height: 28px; border-radius: 50%; background: var(--pill); display: grid; place-items: center; color: var(--label2); }
-.ic svg { width: 14px; height: 14px; }
+.ic { width: 28px; height: 28px; border-radius: 50%; background: var(--pill); display: grid; place-items: center; color: var(--label2);
+  transition: background-color .12s ease-out, color .12s ease-out, transform .1s ease-out; }
+.ic:hover { background: var(--sel); color: var(--label); }
+.ic svg { width: 14px; height: 14px; transition: transform .35s var(--ease-out); }
+/* The gear turns a little on hover (an eighth: its spokes line up again); the theme disc turns half with the theme. */
+.ic[data-do="settings"]:hover svg { transform: rotate(45deg); }
+.ic[data-do="theme"] svg { transition-duration: .45s; }
+:root[data-theme="dark"] .ic[data-do="theme"] svg { transform: rotate(180deg); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 /* Hook card on the main panel */
 .card.hk { padding: 10px 12px; margin-bottom: 8px; }
@@ -219,4 +246,31 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
 .foot { display: flex; align-items: center; gap: 6px; padding: 10px 4px 2px; border-top: .5px solid var(--line); }
 .foot .l { margin-right: auto; font-size: 12px; color: var(--label2); min-width: 0; }
 
-@media (prefers-reduced-motion: reduce) { *, *::after { animation: none !important; transition: none !important; } }
+/* ---------- Motion (k9a). JS adds these classes only after the first paint, never with reduced motion. ---------- */
+/* Press feedback */
+.pill:active, .sure:active, .seg button:active, .acct button:active, .pick button:active { transform: scale(.97); }
+.rb:active, .ic:active { transform: scale(.92); }
+.sure { transition: transform .1s ease-out; }
+.seg button, .acct button { transition: transform .1s ease-out, background-color .15s ease-out, color .15s ease-out; }
+/* New rows and menus: a short rise; rows going away fade. --d is a negative delay when a re-render lands mid-way. */
+.enter { animation: k-rise .22s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
+.pick.enter { animation: k-pop .16s var(--ease-out) backwards; animation-delay: var(--d, 0ms); transform-origin: top right; }
+.leave { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease-out, transform .15s ease-out; pointer-events: none; }
+/* Settings and Review push in from the right; the screen you come back to returns from the left. */
+.panel.in > * { animation: k-push .24s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
+.panel.back > * { animation: k-back .22s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
+.panel.out > * { opacity: 0; transform: translateX(16px); transition: opacity .13s ease-in, transform .13s ease-in; }
+/* Blobs: a small squish when a row is reached, and a ~120 ms blink (eyes shut) then and now. Never a loop. */
+.av { transform-origin: 50% 90%; }
+.av .fc { transform-box: fill-box; transform-origin: center; }
+.av.poke { animation: k-squish .32s var(--ease-out); }
+.av.poke:is(.f-work, .f-wait, .f-idle) .fc, .av.blink:is(.f-work, .f-wait, .f-idle) .fc { animation: k-blink .18s ease-in-out; }
+@keyframes k-rise { from { opacity: 0; transform: translateY(4px); } }
+@keyframes k-pop { from { opacity: 0; transform: scale(.97) translateY(-3px); } }
+@keyframes k-push { from { opacity: 0; transform: translateX(18px); } }
+@keyframes k-back { from { opacity: 0; transform: translateX(-12px); } }
+@keyframes k-turn { from { transform: rotate(0deg); } }
+@keyframes k-squish { 35% { transform: scale(1.06, .92); } 70% { transform: scale(.98, 1.02); } }
+@keyframes k-blink { 30%, 65% { transform: scaleY(.1); } }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

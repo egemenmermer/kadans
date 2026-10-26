@@ -55,6 +55,43 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         view = wv
     }
 
+    // MARK: first frame and fade
+
+    /// Paint the page's own panel colour before (and under) the page, so a dark-mode popover never flashes white.
+    /// The colours are the `panel` token of docs/design/SPEC.md.
+    func softenFirstFrame() {
+        _ = view
+        webView.underPageBackgroundColor = NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(srgbRed: 0x1f / 255, green: 0x1f / 255, blue: 0x22 / 255, alpha: 1)
+                : NSColor.white
+        }
+    }
+
+    /// Fade in on show (opacity 0 -> 1, 160 ms ease-out). Reduce motion: no fade at all.
+    func prepareFade() {
+        _ = view
+        webView.alphaValue = BlobBlinker.reduceMotion ? 1 : 0
+    }
+
+    func fadeIn() {
+        guard !BlobBlinker.reduceMotion else { webView.alphaValue = 1; return }
+        // One turn of the run loop later, so the popover window has its first frame and the fade starts from the real one.
+        DispatchQueue.main.async {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.webView.animator().alphaValue = 1
+            }
+        }
+    }
+
+    /// The panel must never stay invisible: back to full opacity whenever the popover is gone.
+    func resetFade() {
+        webView.layer?.removeAllAnimations()
+        webView.alphaValue = 1
+    }
+
     func load() {
         _ = view
         guard let dir = Config.webDir else {

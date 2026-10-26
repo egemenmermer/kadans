@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let panel = PanelController()
     private var timer: Timer?
     private var lastTitle = ""
+    private let blinker = BlobBlinker()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -14,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = MenuBarBlob.image(face: .work)
+            blinker.button = button
+            blinker.isPopoverShown = { [weak self] in self?.popover.isShown ?? false }
+            button.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                                  owner: blinker, userInfo: nil))
             button.imagePosition = .imageLeading
             button.title = "–"
             button.setAccessibilityLabel("Kadans")
@@ -26,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentViewController = panel
         popover.contentSize = NSSize(width: PanelController.width, height: 420)
         popover.delegate = self
+        panel.softenFirstFrame()
 
         panel.onSize = { [weak self] h in self?.popover.contentSize = NSSize(width: PanelController.width, height: h) }
         panel.onClose = { [weak self] in self?.popover.performClose(nil) }
@@ -43,13 +49,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
         // An accessory app must be active, or Escape and focus never reach the web view.
         NSApp.activate(ignoringOtherApps: true)
+        panel.prepareFade()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        panel.fadeIn()
+        blinker.blink(force: true)
         popover.contentViewController?.view.window?.makeKey()
         panel.refresh(full: true)
         schedule(every: 5)
     }
 
-    func popoverDidClose(_ notification: Notification) { schedule(every: 30) }
+    func popoverDidClose(_ notification: Notification) {
+        panel.resetFade()
+        schedule(every: 30)
+    }
 
     private func schedule(every seconds: TimeInterval) {
         timer?.invalidate()
@@ -64,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func updateItem(_ status: [String: Any]?) {
         guard let button = statusItem.button else { return }
         let item = MenuBarItem(status: status)
-        button.image = MenuBarBlob.image(face: item.face)
+        blinker.setFace(item.face)  // a state change wins over a blink in progress
         button.attributedTitle = item.title
         button.setAccessibilityLabel(item.accessibilityLabel)
         if item.plainTitle != lastTitle {
@@ -131,27 +143,105 @@ struct MenuBarItem {
 }
 
 /// The 16 px blob as a template image (adapts to light/dark menu bars). Eyes are cut out.
+/// The closed-eyes frame keeps the body path untouched, so nothing around the eyes moves when it blinks.
 enum MenuBarBlob {
-    enum Face { case work, slow }
+    enum Face: CaseIterable {
+        case work, slow
+        var name: String { self == .work ? "work" : "slow" }
+    }
 
-    static func image(face: Face) -> NSImage {
-        let img = NSImage(size: NSSize(width: 16, height: 16), flipped: true) { _ in
-            // Same shape as the panel's "square" blob (viewBox 32), scaled by 0.5.
-            let path = NSBezierPath(roundedRect: NSRect(x: 2.25, y: 2.5, width: 11.5, height: 11), xRadius: 3.75, yRadius: 3.75)
-            switch face {
-            case .work:
-                path.append(NSBezierPath(roundedRect: NSRect(x: 5.9, y: 5.6, width: 1.5, height: 3.4), xRadius: 0.75, yRadius: 0.75))
-                path.append(NSBezierPath(roundedRect: NSRect(x: 8.6, y: 5.6, width: 1.5, height: 3.4), xRadius: 0.75, yRadius: 0.75))
-            case .slow:
-                path.append(NSBezierPath(roundedRect: NSRect(x: 5.4, y: 7.0, width: 2.2, height: 1.3), xRadius: 0.65, yRadius: 0.65))
-                path.append(NSBezierPath(roundedRect: NSRect(x: 8.4, y: 7.0, width: 2.2, height: 1.3), xRadius: 0.65, yRadius: 0.65))
-            }
-            path.windingRule = .evenOdd
-            NSColor.black.setFill()
-            path.fill()
+    static let size = NSSize(width: 16, height: 16)
+
+    /// Draws the blob into the current context, 16 x 16 points, top-left origin (flipped).
+    static func draw(face: Face, eyesClosed: Bool = false) {
+        // Same shape as the panel's "square" blob (viewBox 32), scaled by 0.5.
+        let path = NSBezierPath(roundedRect: NSRect(x: 2.25, y: 2.5, width: 11.5, height: 11), xRadius: 3.75, yRadius: 3.75)
+        func eye(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) {
+            path.append(NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: min(w, h) / 2, yRadius: min(w, h) / 2))
+        }
+        switch (face, eyesClosed) {
+        case (.work, false):
+            eye(5.9, 5.6, 1.5, 3.4)
+            eye(8.6, 5.6, 1.5, 3.4)
+        case (.work, true):
+            // Eyes shut: two thin lines at the height the open eyes were centred on.
+            eye(5.5, 6.8, 2.1, 1.0)
+            eye(8.4, 6.8, 2.1, 1.0)
+        case (.slow, false):
+            eye(5.4, 7.0, 2.2, 1.3)
+            eye(8.4, 7.0, 2.2, 1.3)
+        case (.slow, true):
+            // The half-shut bars thin out and sink a little: lids all the way down.
+            eye(5.4, 7.7, 2.2, 0.7)
+            eye(8.4, 7.7, 2.2, 0.7)
+        }
+        path.windingRule = .evenOdd
+        NSColor.black.setFill()
+        path.fill()
+    }
+
+    static func image(face: Face, eyesClosed: Bool = false) -> NSImage {
+        let img = NSImage(size: size, flipped: true) { _ in
+            draw(face: face, eyesClosed: eyesClosed)
             return true
         }
         img.isTemplate = true
         return img
+    }
+}
+
+/// Blinks the menu bar blob when the pointer enters it, and once when the popover opens.
+/// No timers run while idle: a blink is a few one-shot work items that end by themselves. Reduce motion turns it off.
+final class BlobBlinker: NSObject {
+    weak var button: NSStatusBarButton?
+    var isPopoverShown: () -> Bool = { false }
+
+    static let closedFor: TimeInterval = 0.11
+    static let secondBlinkGap: TimeInterval = 0.12
+    static let secondBlinkChance = 0.2
+    static let minGap: TimeInterval = 1.5
+
+    private var face: MenuBarBlob.Face = .work
+    private var lastBlink: Date = .distantPast
+    /// Bumped by every blink start and every face change; a pending step from an older blink does nothing.
+    private var generation = 0
+
+    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// The menu bar state changed: show the new face, open-eyed, and drop whatever blink was running.
+    func setFace(_ f: MenuBarBlob.Face) {
+        face = f
+        generation += 1
+        button?.image = MenuBarBlob.image(face: f)
+    }
+
+    @objc func mouseEntered(with event: NSEvent) {
+        guard !isPopoverShown() else { return }
+        blink(force: false)
+    }
+
+    /// force: the popover-open blink, which skips the popover and rate checks (never reduce motion).
+    func blink(force: Bool, doubleBlink: Bool? = nil) {
+        guard !Self.reduceMotion, let button else { return }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastBlink) < Self.minGap { return }
+        lastBlink = now
+        generation += 1
+        let gen = generation
+        let again = doubleBlink ?? (Double.random(in: 0..<1) < Self.secondBlinkChance)
+        step(gen, closed: true, remainingBlinks: again ? 2 : 1, button)
+    }
+
+    private func step(_ gen: Int, closed: Bool, remainingBlinks: Int, _ button: NSStatusBarButton) {
+        guard gen == generation else { return }
+        button.image = MenuBarBlob.image(face: face, eyesClosed: closed)
+        let delay = closed ? Self.closedFor : Self.secondBlinkGap
+        let nextClosed = !closed
+        let left = closed ? remainingBlinks - 1 : remainingBlinks
+        if !closed && left == 0 { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak button] in
+            guard let self, let button else { return }
+            self.step(gen, closed: nextClosed, remainingBlinks: left, button)
+        }
     }
 }
