@@ -1,0 +1,16 @@
+{
+  "name": "kadans",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pace Claude Code usage limits: a speedometer for the 5-hour and 7-day windows, in the macOS menu bar",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "kadans": "bin/kadans.mjs" },
+  "scripts": { "test": "node --test" },
+  "engines": { "node": ">=22" },
+  "os": ["darwin"],
+  "repository": { "type": "git", "url": "git+https://github.com/egemenmermer/kadans.git" },
+  "bugs": { "url": "https://github.com/egemenmermer/kadans/issues" },
+  "homepage": "https://github.com/egemenmermer/kadans#readme",
+  "keywords": ["claude-code", "claude", "usage-limits", "menu-bar", "macos", "rate-limit", "agents", "hooks"]
+}
