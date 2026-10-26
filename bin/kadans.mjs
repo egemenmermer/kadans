@@ -14,7 +14,7 @@ import { notifyBrakeOnce, runPretool, runStop } from '../lib/hooks.mjs';
 import { notify } from '../lib/notify.mjs';
 import { kadansCommand, plan } from '../lib/install.mjs';
 import { configView, setSetting } from '../lib/config.mjs';
-import { findAgent, listAgents, orcaRunner, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
+import { compactAgent, findAgent, listAgents, orcaRunner, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
 import { setTitle } from '../lib/titles.mjs';
 import { MODE_OF, clearAutoPause, ownKey, parseUntil, runPacePost, runPacePre, setAutopace, setPace, windowOf } from '../lib/pace-control.mjs';
 import { checkStartable, describePlan, replaceAgent, startPlan, startTask } from '../lib/launch.mjs';
@@ -40,6 +40,9 @@ Usage:
   kadans agents [--json] [--all]   running Claude Code agents (and Orca's); the text list leaves out agents
                       idle for 2+ hours (JSON marks them stale: true); --all lists them and ended ones
   kadans agent stop <id>     stop one agent (Orca terminal close, else SIGTERM to its pid)
+  kadans agent compact <id> [--dry-run]   type /compact into an idle chat's Orca terminal (orca terminal send);
+                      refused for working, waiting or ended chats, a chat with unsent text in its input line, and
+                      outside Orca (type /compact there yourself)
   kadans agent title <id> "<text>"   set the agent's title ("" clears it)
   kadans agent replace <agentId> <taskId> [--dry-run]   stop the agent, then task start
   kadans agent pace <id> slow|pause|none [--until reset|30m]   slow (wait before each tool call), pause
@@ -50,7 +53,9 @@ Usage:
   kadans config set <key> <value>      limits auto|five_hour|five_hour,seven_day, targets.five_hour|targets.seven_day
                       50-100, slack 0-30, warmup.minutes 0-60, warmup.pct 0-50, notify|autopace true|false,
                       lang en|tr, accounts.<own key>.gas true|false (your own account only),
-                      kickoff.enabled true|false, kickoff.from|kickoff.to HH:MM
+                      kickoff.enabled true|false, kickoff.from|kickoff.to HH:MM,
+                      compact.soonPct 10-95 (% of the context window) or 101 (Off), compact.nowPct 10-95,
+                      compact.idleMin 1-120
   kadans kickoff [--dry-run]   start the next 5-hour window with one tiny Haiku message (claude -p, own account),
                       only if kickoff.enabled, inside kickoff.from-kickoff.to, and the window has ended
   kadans kickoff schedule|unschedule [--apply]   preview (or write and load) the launchd job that runs
@@ -488,7 +493,21 @@ function agentCmd(sub, args, env) {
     return 0;
   }
   if (sub === 'pace') return paceCmd(home, pos, flags, env);
-  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|replace|pace <id> ...');
+  if (sub === 'compact') {
+    if (pos.length < 1) return fail('usage: kadans agent compact <id> [--dry-run]');
+    const run = orcaRunner(env);
+    const { agent, why } = findAgent(listAgents(home, { run, all: true, claudeDirs: [configDir(env)] }), pos[0]);
+    if (!agent) return fail(why);
+    const dryRun = Boolean(flags['dry-run']);
+    const r = compactAgent(agent, { run, dryRun });
+    if (!r.ok) return fail(`not compacted: ${r.why}`);
+    process.stdout.write(dryRun ? `dry run: nothing sent
+${agent.id}: ${r.how}
+` : `${agent.id}: ${r.how}
+`);
+    return 0;
+  }
+  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|replace|pace|compact <id> ...');
   const run = orcaRunner(env);
   const { agent, why } = findAgent(listAgents(kadansHome(env), { run, claudeDirs: [configDir(env)] }), pos[0]);
   if (!agent) return fail(why);

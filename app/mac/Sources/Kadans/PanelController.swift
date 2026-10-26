@@ -10,6 +10,47 @@ final class WeakHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+// BridgeResult begin (pure: no AppKit or WebKit, so it can be compiled and checked on its own)
+/// What the page hears after a bridge action: `window.kadans.result({action, id, ok, why})`.
+enum BridgeResult {
+    static let maxWhy = 200
+
+    /// The first non-empty line of the CLI's stderr (stdout when stderr is empty), without the "kadans: " prefix, at most
+    /// `maxWhy` characters. Empty when the command succeeded.
+    static func why(code: Int32, out: String, err: String, timedOut: Bool) -> String {
+        if code == 0 && !timedOut { return "" }
+        if timedOut { return "It took too long and was given up" }
+        for text in [err, out] {
+            for line in text.split(whereSeparator: \.isNewline) {
+                var l = line.trimmingCharacters(in: .whitespaces)
+                if l.hasPrefix("kadans: ") { l = String(l.dropFirst(8)) }
+                if !l.isEmpty { return String(l.prefix(maxWhy)) }
+            }
+        }
+        return "It failed (code \(code))"
+    }
+
+    static func payload(action: String, id: String, code: Int32, out: String, err: String, timedOut: Bool) -> [String: Any] {
+        let ok = code == 0 && !timedOut
+        return ["action": action, "id": id, "ok": ok, "why": why(code: code, out: out, err: err, timedOut: timedOut)]
+    }
+
+    /// A JSON value as a JavaScript literal. JSON is a subset of JavaScript once U+2028 / U+2029 are escaped, and
+    /// JSONSerialization escapes quotes, backslashes and control characters, so no text ever reaches the page as source.
+    static func literal(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object), let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+    }
+
+    static func script(_ payload: [String: Any]) -> String? {
+        guard let json = literal(payload) else { return nil }
+        return "window.kadans && window.kadans.result && window.kadans.result(\(json)); true;"
+    }
+}
+// BridgeResult end
+
 /// Hosts app/web/panel.html and is the only bridge between the page and the CLI.
 final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
     static let width: CGFloat = 320
@@ -25,7 +66,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     private var installChanged = false
     /// Snapshot of a fixture: the page may not reach the CLI at all (no refresh, no actions).
     var fixtureOnly = false
-    /// Ids from the latest `agents --json`; a stop request must name one of these.
+    /// Ids from the latest `agents --json`; a stop or compact request must name one of these.
     private var agentIds = Set<String>()
 
     var onLoaded: (() -> Void)?
@@ -178,10 +219,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
 
     /// `window.kadans.render(payload)`. The page keeps the keys a payload leaves out (status, agents, config, install).
     func push(_ payload: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { log("render: payload not serialisable"); return }
-        let json = String(decoding: data, as: UTF8.self)
-            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
-            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        guard let json = BridgeResult.literal(payload) else { log("render: payload not serialisable"); return }
         evaluate("window.kadans && window.kadans.render(\(json)); true;")
     }
 
@@ -232,13 +270,21 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     }
 
     /// Opening a session can wait on Orca (up to 30 s), hence the longer timeout for start and replace.
-    private func runThenRefresh(_ args: [String], timeout: TimeInterval = 10) {
+    /// result: { action, id } names the page's row or setting; when given, the page hears how it ended
+    /// (`window.kadans.result`, JSON-encoded) before the refresh.
+    private func runThenRefresh(_ args: [String], timeout: TimeInterval = 10, result: (action: String, id: String)? = nil) {
         log(args.joined(separator: " "))
         DispatchQueue.global(qos: .userInitiated).async {
             let r = CLI.run(args, timeout: timeout)
-            log("\(args.prefix(2).joined(separator: " ")): code \(r.code)\(r.timedOut ? " (timed out)" : "") " +
-                "\(String(decoding: r.out, as: UTF8.self)) \(r.err)")
-            DispatchQueue.main.async { self.refresh(full: true) }
+            let out = String(decoding: r.out, as: UTF8.self)
+            log("\(args.prefix(2).joined(separator: " ")): code \(r.code)\(r.timedOut ? " (timed out)" : "") \(out) \(r.err)")
+            DispatchQueue.main.async {
+                if let result {
+                    let p = BridgeResult.payload(action: result.action, id: result.id, code: r.code, out: out, err: r.err, timedOut: r.timedOut)
+                    if let js = BridgeResult.script(p) { self.evaluate(js) }
+                }
+                self.refresh(full: true)
+            }
         }
     }
 
@@ -285,29 +331,34 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
             runThenRefresh(["install", "--apply"], timeout: 20)
         case "config-set":
             // Key and value pass through as argv; `kadans config set` holds the allow-list and validates both.
-            guard let key = Self.configArg(body["key"], pattern: "^[a-z0-9_.]+$"),
+            // Keys may be camelCase (compact.soonPct); the CLI allow-list still decides.
+            guard let key = Self.configArg(body["key"], pattern: "^[A-Za-z0-9_.]+$"),
                   let value = Self.configArg(body["value"], pattern: "^[a-z0-9_,:]+$") else {
                 log("ignored config-set: key or value is not a short plain string")
                 return
             }
-            runThenRefresh(["config", "set", key, value])
+            runThenRefresh(["config", "set", key, value], result: ("config-set", key))
         // The only actions that run a CLI command with page data. Agent ids must be in the latest agents list and
         // task ids must be positive integers (JSON booleans rejected); argv only, never a shell; refresh afterwards.
         case "stop":
             guard let id = agentId(body["id"]) else { log("ignored stop: id is not in the current agents list"); return }
-            runThenRefresh(["agent", "stop", id])
+            runThenRefresh(["agent", "stop", id], result: ("stop", id))
+        case "compact":
+            // Types /compact into that chat's Orca terminal; the CLI refuses anything but an idle chat in a known terminal.
+            guard let id = agentId(body["id"]) else { log("ignored compact: id is not in the current agents list"); return }
+            runThenRefresh(["agent", "compact", id], result: ("compact", id))
         case "approve":
             guard let task = Self.taskId(body["id"]) else { log("ignored approve: id is not a task number"); return }
             runThenRefresh(["approve", String(task)])
         case "start":
             guard let task = Self.taskId(body["id"]) else { log("ignored start: id is not a task number"); return }
-            runThenRefresh(["task", "start", String(task)], timeout: 45)
+            runThenRefresh(["task", "start", String(task)], timeout: 45, result: ("start", String(task)))
         case "replace":
             guard let id = agentId(body["id"]), let task = Self.taskId(body["task"]) else {
                 log("ignored replace: agent id not in the current list or task is not a number")
                 return
             }
-            runThenRefresh(["agent", "replace", id, String(task)], timeout: 45)
+            runThenRefresh(["agent", "replace", id, String(task)], timeout: 45, result: ("replace", id))
         case "pace":
             // mode slow|pause|none; optional until reset|30m (the two pause items in the menu). Nothing else passes.
             guard let id = agentId(body["id"]), let mode = body["mode"] as? String, ["slow", "pause", "none"].contains(mode) else {

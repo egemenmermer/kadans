@@ -16,7 +16,8 @@
     ...['SessionStart', 'UserPromptSubmit', 'Stop', 'SubagentStart', 'SubagentStop', 'SessionEnd', 'Notification'].map((e) => ch(e, 'hook event'))];
   const config = {
     version: 1, limits: 'auto', targets: { five_hour: 97, seven_day: 98 }, slack: 10, warmup: { minutes: 10, pct: 10 },
-    notify: false, autopace: true, lang: 'en', kickoff: { enabled: false, from: '07:00', to: '23:00' }, own: 'aaaaaaaaaaaa', accounts: { aaaaaaaaaaaa: { gas: false } },
+    notify: false, autopace: true, lang: 'en', kickoff: { enabled: false, from: '07:00', to: '23:00' },
+    compact: { soonPct: 40, nowPct: 60, idleMin: 5 }, own: 'aaaaaaaaaaaa', accounts: { aaaaaaaaaaaa: { gas: false } },
   };
   const twoAccounts = KF.status({ accounts: [KF.acct(), KF.acct({ key: 'cccccccccccc', label: 'Other account', configDir: null, own: false })] });
   const openSettings = (doc) => doc.querySelector('[data-do="settings"]')?.click();

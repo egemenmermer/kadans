@@ -124,6 +124,7 @@
     stop: '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="4.5" y="4.5" width="7" height="7" rx="1.8"/></svg>',
     open: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h6v6M12 4l-7.5 7.5"/></svg>',
     x: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
+    compact: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8v4.4M5.6 4 8 6.2 10.4 4M8 14.2V9.8M5.6 12 8 9.8l2.4 2.2M3.5 8h9"/></svg>',
     chev: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4l4 4-4 4"/></svg>',
     theme: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>',
     gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
@@ -142,7 +143,10 @@
     // firstAt = first paint (never animated); slide = settings push {dir, at}; once = one-shot classes for the next render;
     // leaving = an exit animation is running. Close idle: closeAll = "Close N idle chats?" open; bulk = the run in progress.
     seen: new Map(), gauge: new Map(), firstAt: 0, slide: null, once: new Set(), leaving: false, hoverKey: null, focusKey: null,
-    closeAll: false, closeTimer: null, bulk: null };
+    closeAll: false, closeTimer: null, bulk: null,
+    // k10b: the one compact in flight, { id, tokens (context at the click), at, failedAt }.
+    // k12: the latest action result for one row, { id, ok, why, at }, shown for RESULT_KEEP_MS.
+    compact: null, result: null };
 
   // ---------- motion (k9a) ----------
   // Calm and short: 120-260 ms, transform and opacity only (the gauge fill may sweep its width). Nothing moves on the first
@@ -329,14 +333,99 @@
     return (Array.isArray(queue?.next) ? queue.next : []).filter((t) => t && t.approved === true);
   }
 
-  const canStopAgent = (a) => finite(a.pid) || (Boolean(a.orca?.terminal) && !a.orca?.ambiguous);
+  const orcaOk = (a) => Boolean(a.orca?.terminal) && !a.orca?.ambiguous;
+  const canStopAgent = (a) => finite(a.pid) || orcaOk(a);
+
+  // ---------- compact (k10b) ----------
+  // `context` per row comes from `agents --json` (k10a): { tokens, window, pct, advice: none|soon|now, why } or null.
+  // Compact is offered only where `kadans agent compact` would act: an idle Claude session (not working, needs-you,
+  // slowed, paused or ended) in a known, unambiguous Orca terminal, with advice soon or now, hints not Off, and no other
+  // compact in flight. The CLI's /compact returns as soon as the text is typed, so a finished compact is read from the
+  // data: the context gets smaller on a later refresh ("Compacted"). After COMPACT_WAIT_MS without that the row says so
+  // for COMPACT_KEEP_MS. A refusal (the CLI exited with an error) arrives through window.kadans.result and shows its
+  // reason on the row for RESULT_KEEP_MS (k12).
+  const COMPACT_WAIT_MS = 90_000;
+  const COMPACT_KEEP_MS = 8000;
+  const RESULT_KEEP_MS = 8000;
+  // A reason may be a whole sentence: up to two lines, then an ellipsis (the full text is in the title). Inline because
+  // panel.css is not part of this change.
+  const REASON_STYLE = 'display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;overflow:hidden';
+  // Off: compact.soonPct = COMPACT_OFF; `config set` stores it and compactAdvice then says none for every chat (k12).
+  const COMPACT_OFF = 101;
+  const TYPE_IT = 'Type /compact in that chat';
+  const hintsOff = () => Number(cfgVal('compact.soonPct')) >= COMPACT_OFF;
+  const adviceOf = (a) => (hintsOff() ? 'none' : a.context?.advice === 'now' || a.context?.advice === 'soon' ? a.context.advice : 'none');
+  const compactInFlight = () => Boolean(view.compact && !view.compact.failedAt);
+  const canCompact = (a) => rowState(a) === 'idle' && a.source === 'claude' && !String(a.id).startsWith('orca:') && orcaOk(a) &&
+    adviceOf(a) !== 'none' && finite(a.context?.tokens);
+  const offerCompact = (a) => canCompact(a) && !compactInFlight();
+  const findAgent = (id) => agentList(view.data?.agents).find((a) => a && String(a.id) === String(id)) ?? null;
+
+  // The compact in flight, settled against the latest data: done (context smaller, row ended or gone) clears it;
+  // no change after COMPACT_WAIT_MS marks it failed, shown for COMPACT_KEEP_MS.
+  function compactState() {
+    const c = view.compact;
+    if (!c) return null;
+    const now = Date.now();
+    if (!c.failedAt) {
+      const a = findAgent(c.id);
+      if (!a || rowState(a) === 'ended' || (finite(a.context?.tokens) && a.context.tokens < c.tokens)) {
+        view.compact = null;
+        if (a && rowState(a) !== 'ended') setResult(a.id, true, 'Compacted');
+        return null;
+      }
+      if (now - c.at >= COMPACT_WAIT_MS) {
+        c.failedAt = now;
+        setTimeout(() => render({}), COMPACT_KEEP_MS + 50);
+      }
+    } else if (now - c.failedAt >= COMPACT_KEEP_MS) {
+      view.compact = null;
+      return null;
+    }
+    return c;
+  }
+
+  // The result line of one row: { ok, why } for RESULT_KEEP_MS, then gone.
+  function setResult(id, ok, why) {
+    view.result = { id: String(id), ok, why, at: Date.now() };
+    setTimeout(() => render({}), RESULT_KEEP_MS + 50);
+  }
+  function resultFor(id) {
+    const r = view.result;
+    if (!r) return null;
+    if (Date.now() - r.at >= RESULT_KEEP_MS) { view.result = null; return null; }
+    return String(r.id) === String(id) ? r : null;
+  }
+  const clearResult = (id) => { if (view.result && String(view.result.id) === String(id)) view.result = null; };
+
+  // The host's answer to a bridge action: { action, id, ok, why }. Only a failed stop, compact or replace shows (why: the
+  // first line of the CLI's message, text only); the rest is read from the next refresh, as before.
+  function actionResult(r) {
+    if (!r || typeof r !== 'object' || r.ok === true || !['stop', 'compact', 'replace'].includes(r.action) || r.id == null) return;
+    const why = typeof r.why === 'string' ? r.why.replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+    if (r.action === 'compact' && view.compact && String(view.compact.id) === String(r.id)) view.compact = null;
+    setResult(r.id, false, why || 'It did not work');
+    render({});
+  }
+
+  function compactGo(id) {
+    setConfirm(null);
+    clearResult(id);
+    const a = findAgent(id);
+    // Checked again at the click: the chat may have started working since the confirm opened.
+    if (!a || !offerCompact(a)) return;
+    view.compact = { id: a.id, tokens: a.context.tokens, at: Date.now(), failedAt: null };
+    send({ action: 'compact', id: a.id });
+    setTimeout(() => render({}), COMPACT_WAIT_MS + 50);
+  }
 
   function actsHtml(a, st, tasks) {
     const id = a.id;
     if (view.confirm === id) {
       const replace = view.kind === 'replace';
-      const word = replace ? 'Replace' : view.kind === 'close' ? 'Close' : 'Stop';
-      return `<div class="acts on"><button class="sure${replace ? ' go' : ''}" data-do="${replace ? 'replace-go' : 'stop'}" ` +
+      const compact = view.kind === 'compact';
+      const word = replace ? 'Replace' : compact ? 'Compact' : view.kind === 'close' ? 'Close' : 'Stop';
+      return `<div class="acts on"><button class="sure${replace || compact ? ' go' : ''}" data-do="${replace ? 'replace-go' : compact ? 'compact-go' : 'stop'}" ` +
         `data-id="${esc(id)}">${word}</button>` +
         `<button class="pill" data-do="cancel" data-id="${esc(id)}">Cancel</button></div>`;
     }
@@ -354,8 +443,9 @@
     const last = st === 'idle'
       ? btn('close', id, IC.x, 'Close chat', { disabled: !canStop, why: "Can't close from here" })
       : btn('confirm', id, IC.stop, 'Stop', { disabled: !canStop, why: "Can't stop from here" });
+    const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
     return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${first}` +
-      `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${last}</div>`;
+      `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${comp}${last}</div>`;
   }
 
   function pickerHtml(a, tasks) {
@@ -395,14 +485,42 @@
       if (swap) [pre, preText] = [`Replace with: ${esc(swap.text)}`, `Replace with: ${swap.text}. `];
       const ask = view.confirm === a.id && view.kind === 'close';
       if (ask) [pre, preText] = ['<span class="ask">Close this chat?</span>', 'Close this chat? '];
-      const parts = [a.project, st === 'ended' ? null : family(a.model), tokens(a.tokens),
+      const why = String(a.context?.why ?? '');
+      const askC = view.confirm === a.id && view.kind === 'compact';
+      // Compact / Cancel leave too little room on the row for the question and its reason: both go on a line under
+      // the row (see .cwhy); the row keeps its meta line, without the tag.
+      if (askC) preText = `Compact this chat? ${why}. ${preText}`;
+      const cs = !askC && view.compact && String(view.compact.id) === String(a.id) ? view.compact : null;
+      if (cs && !cs.failedAt) [pre, preText] = ['Compacting… · ', 'Compacting. '];
+      const rs = !askC && !ask && !swap ? resultFor(a.id) : null;
+      if (rs?.ok) [pre, preText] = ['Compacted · ', 'Compacted. '];
+      if (cs?.failedAt) {
+        const note = 'Kadans saw no smaller context within 90 s. If it did not compact, type /compact in that chat.';
+        [pre, preText] = [`<span class="warn" title="${esc(note)}">Compact not confirmed</span> · `, `Compact not confirmed: ${note} `];
+      }
+      // The number is the current context ("124k ctx"); the lifetime sum moves to the tooltip. 'now' adds a quiet tag.
+      const ctx = finite(a.context?.tokens) ? `${tokens(a.context.tokens)} ctx` : null;
+      const quiet = swap || ask || (rs && !rs.ok);
+      const tagOn = ctx && !cs && !quiet && !askC && adviceOf(a) === 'now';
+      const tagTip = tagOn ? `${why || 'Big context'}${canCompact(a) ? '' : `. ${TYPE_IT}`}` : '';
+      // The tag and its number lead the meta line (like "Needs you"), so a long line never cuts them off.
+      const tag = tagOn ? `<span class="tag" title="${esc(tagTip)}">Compact?</span> ${esc(ctx)} · ` : '';
+      const parts = [a.project, st === 'ended' ? null : family(a.model), tagOn ? null : ctx,
         st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt)].filter(Boolean).map(String);
-      const line = swap || ask ? '' : parts.join(' · ');
+      let line = quiet ? '' : parts.join(' · ');
+      // A refused action: its reason is the whole meta line (the full text in the title), reusing the .warn line.
+      if (rs && !rs.ok) [pre, preText, line] = [`<span class="warn" title="${esc(rs.why)}" style="${REASON_STYLE}">${esc(rs.why)}</span>`, `${rs.why}. `, ''];
+      const life = tokens(a.tokens);
+      const tip = life ? `${title}\n${life} tokens since start, cache reads not counted` : title;
       const [ec, es] = enter(`row:${a.id}`);
       const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}${ec}`;
-      html += `<div class="${cls}"${es} tabindex="0" data-key="row:${esc(a.id)}" title="${esc(title)}" aria-label="${esc(`${title}. ${preText}${line}`)}">` +
-        `${avatar(shapeFor(a.id), FACE[st])}<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${pre}${esc(line)}</div></div>` +
+      html += `<div class="${cls}"${es} tabindex="0" data-key="row:${esc(a.id)}" title="${esc(tip)}" aria-label="${esc(`${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}`)}">` +
+        `${avatar(shapeFor(a.id), FACE[st])}<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${tag}${pre}${esc(line)}</div></div>` +
         `${actsHtml(a, st, tasks)}</div>`;
+      if (askC) {
+        const [wc, ws] = enter(`why:${a.id}`);
+        html += `<div class="cwhy${wc}"${ws}><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>`;
+      }
       if (view.picker === a.id) html += pickerHtml(a, tasks);
       if (view.pacer === a.id) {
         const st0 = view.data?.status;
@@ -527,6 +645,17 @@
       `data-unit="${esc(unit)}" data-key="rng:${esc(key)}">${desc ? `<div class="d">${desc}</div>` : ''}</div>`;
   }
 
+  // "Suggest compact": Off / 40 % / 60 % for compact.soonPct (nowPct and idleMin stay as they are). Off is COMPACT_OFF
+  // (101) and hides every hint and button.
+  function compactSeg() {
+    const key = 'compact.soonPct';
+    const cur = Number(cfgVal(key));
+    const opt = (v, t, on) =>
+      `<button aria-pressed="${on}" data-do="set" data-k="${key}" data-v="${v}" data-key="set:${key}:${v}">${esc(t)}</button>`;
+    return `<div class="seg" role="group" aria-label="Suggest compact">${opt(COMPACT_OFF, 'Off', cur >= COMPACT_OFF)}` +
+      `${opt(40, '40 %', cur === 40)}${opt(60, '60 %', cur === 60)}</div>`;
+  }
+
   // Whole-hour slider for an "HH:MM" setting (kickoff.from / kickoff.to); sends "HH:00".
   const hh = (n) => `${String(n).padStart(2, '0')}:00`;
   function sHour(key, title) {
@@ -601,7 +730,8 @@
 
     h += '<div class="gl">Auto-pace</div><div class="sgrp">' +
       sItem('Auto-pace', 'Nudges agents when usage runs hot and slows them if the brake holds 10 min. Same as the switch in the panel.',
-        sSwitch('autopace', 'Auto-pace')) + '</div>';
+        sSwitch('autopace', 'Auto-pace')) +
+      sItem('Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()) + '</div>';
 
     const ko = cfg.kickoff && typeof cfg.kickoff === 'object' ? cfg.kickoff : null;
     if (ko) {
@@ -729,6 +859,8 @@
     const tasks = startable(status?.queue);
     if (view.confirm && !all.some((a) => a.id === view.confirm)) view.confirm = null;
     if (view.confirm && view.kind === 'replace' && !tasks.some((t) => String(t.id) === String(view.task))) view.confirm = null;
+    compactState();
+    if (view.confirm && view.kind === 'compact' && !all.some((a) => a.id === view.confirm && offerCompact(a))) view.confirm = null;
     if (view.picker && (!all.some((a) => a.id === view.picker) || !tasks.length)) view.picker = null;
     if (view.pacer && !all.some((a) => a.id === view.pacer && ['working', 'idle'].includes(rowState(a)))) view.pacer = null;
     if (!old.length) view.closeAll = false;
@@ -1010,9 +1142,10 @@
     const find = (k) => [...el.querySelectorAll('[data-key],[data-do]')].find((n) => keyOf(n) === k);
     let target = find(key);
     if (!target && (action === 'confirm' || action === 'close')) target = find(`stop:${id}`); // confirm swapped in Stop + Cancel
+    if (!target && action === 'compact') target = find(`compact-go:${id}`);
     if (!target && action === 'pick') target = find(`replace-go:${id.slice(0, id.lastIndexOf(':'))}`);
-    if (!target && (action === 'stop' || action === 'cancel' || action === 'replace-go')) {
-      target = find(`confirm:${id}`) ?? find(`close:${id}`) ?? find(`replace:${id}`) ?? find(`row:${id}`);
+    if (!target && (action === 'stop' || action === 'cancel' || action === 'replace-go' || action === 'compact-go')) {
+      target = find(`confirm:${id}`) ?? find(`close:${id}`) ?? find(`compact:${id}`) ?? find(`replace:${id}`) ?? find(`row:${id}`);
     }
     if (!target && action.startsWith('close-all')) target = find('close-all-go:') ?? find('close-all:') ?? find('idle-group');
     if (!target && action !== 'row') target = find(`row:${id}`);
@@ -1070,11 +1203,19 @@
     switch (b.dataset.do) {
       case 'confirm': view.picker = null; view.pacer = null; setConfirm(id); break;
       case 'close': view.picker = null; view.pacer = null; setConfirm(id, 'close'); break;
+      case 'compact': {
+        view.picker = null;
+        view.pacer = null;
+        const a = findAgent(id);
+        if (a && offerCompact(a)) setConfirm(a.id, 'compact');
+        break;
+      }
+      case 'compact-go': compactGo(id); break;
       case 'close-all': setConfirm(null); setCloseAll(true); break;
       case 'close-all-cancel': setCloseAll(false); break;
       case 'close-all-go': closeAllGo(); return;
       case 'cancel': setConfirm(null); break;
-      case 'stop': setConfirm(null); send({ action: 'stop', id }); break;
+      case 'stop': setConfirm(null); clearResult(id); send({ action: 'stop', id }); break;
       case 'replace':
         setConfirm(null);
         view.pacer = null;
@@ -1283,8 +1424,11 @@
     view.closeAll = false;
     view.bulk = null;
     view.idleOpen = false;
+    view.compact = null;
+    view.result = null;
+    setConfirm(null);
   }
-  window.kadans = { version: 1, render, send, reset, assignShapes };
+  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();

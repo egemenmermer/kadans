@@ -61,7 +61,9 @@ function loadPanel(opts = {}) {
   vm.runInContext(read('panel.js'), ctx);
   vm.runInContext(['_base.js', ...readdirSync(join(WEB, 'fixtures')).filter((f) => f.endsWith('.js') && f !== '_base.js').sort()]
     .map((f) => read(join('fixtures', f))).join('\n;\n'), ctx);
-  return { window, document, html: () => html, sent };
+  // a click on any element by its dataset (Settings segments carry data-k / data-v, which the fake querySelector does not parse)
+  const tap = (dataset) => click({ target: { closest: () => ({ dataset, getAttribute: () => null }) } });
+  return { window, document, html: () => html, sent, tap };
 }
 
 // Fails on any tag or attribute the panel does not write itself (e.g. an injected <img onerror=...>).
@@ -209,4 +211,309 @@ test('panel: Close all confirms once, sends one stop per closable 2+ hour idle c
   p.window.kadans.render({ agents });
   assert.match(p.html(), /Closed 1 of 2 · <span class="warn">1 didn't close<\/span>/);
   assert.deepEqual(stops(), ['fx-0010', 'orca:term_fx11']);
+});
+
+// ---------- k10b: compact hint and action ----------
+// One agent row's markup, from its opening tag up to the next row (or the end).
+function rowHtml(html, id) {
+  const start = html.indexOf(`data-key="row:${id}"`);
+  assert.ok(start >= 0, `row ${id} is on screen`);
+  const open = html.lastIndexOf('<div class="row', start);
+  const next = html.indexOf('<div class="row', start);
+  return html.slice(open, next < 0 ? undefined : next);
+}
+const compacts = (p) => p.sent.filter((m) => m.action === 'compact');
+
+test('panel: context number and compact hint for none / soon / now / null', () => {
+  const p = loadPanel();
+  p.window.kadans.reset();
+  p.window.kadans.render(p.window.KADANS_FIXTURES.compact);
+  const html = p.html();
+  // none (working): the number, no tag; the lifetime sum only in the tooltip
+  const none = rowHtml(html, 'fx-0024');
+  assert.match(none, /Quarry · Opus · 148k ctx · 40 min/);
+  assert.doesNotMatch(none, /class="tag"/);
+  assert.doesNotMatch(none, /class="pv">[^<]*2\.1M/);
+  assert.match(none, /title="Port the CSV importer\n2\.1M tokens since start, cache reads not counted"/);
+  // null: no number in that slot
+  const nul = rowHtml(html, 'fx-0025');
+  assert.doesNotMatch(nul, /ctx/);
+  assert.match(nul, /Fernway · Sonnet · 2 min/);
+  // soon: the number is enough
+  const soon = rowHtml(html, 'fx-0022');
+  assert.match(soon, /92k ctx/);
+  assert.doesNotMatch(soon, /class="tag"/);
+  // now: a quiet tag right after the number, the why as its title and in the row's aria text
+  const now = rowHtml(html, 'fx-0021');
+  assert.match(now, /class="pv"><span class="tag" title="Idle 12 min: next turn re-reads all 152k">Compact\?<\/span> 152k ctx · Idle 12 min · Tidepool · Opus · 1 hr 35 min</);
+  assert.match(now, /aria-label="Refactor the sync worker\. Compact\? Idle 12 min: next turn re-reads all 152k\. 152k ctx\. Idle/);
+  // now, but no Orca terminal: the tag tells the owner to type it
+  assert.match(rowHtml(html, 'fx-0023'), /class="tag" title="Re-reads 128k tokens every turn\. Type \/compact in that chat">Compact\?/);
+});
+
+test('panel: Compact only on idle chats with advice in a usable Orca terminal', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const btnOn = (html, id) => new RegExp(`data-do="compact" data-id="${id}"`).test(html);
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  let html = p.html();
+  assert.ok(btnOn(html, 'fx-0021'), 'now + Orca');
+  assert.ok(btnOn(html, 'fx-0022'), 'soon + Orca');
+  assert.ok(!btnOn(html, 'fx-0023'), 'now without Orca');
+  assert.ok(!btnOn(html, 'fx-0024') && !btnOn(html, 'fx-0025'), 'working / needs-you');
+  // The same big context on rows that must never be compacted (k10a gives them 'none', the panel does not rely on it)
+  const N = p.window.KF.N;
+  const M = p.window.KF.M;
+  const big = { tokens: 150000, window: 200000, pct: 75, advice: 'now', why: 'Re-reads 150k tokens every turn' };
+  const orca = (t) => ({ terminal: t, worktree: 'x', repo: 'x', state: 'idle', title: null, ambiguous: false });
+  const A = p.window.KF.agent;
+  const rows = [
+    A('fx-0031', { status: 'working', context: big, orca: orca('term_a') }),
+    A('fx-0032', { status: 'needs-you', context: big, orca: orca('term_b') }),
+    A('fx-0033', { status: 'idle', lastSeen: N - 9 * M, pace: { mode: 'slow', until: null }, context: big, orca: orca('term_c') }),
+    A('fx-0034', { status: 'idle', lastSeen: N - 9 * M, pace: { mode: 'paused', until: null }, context: big, orca: orca('term_d') }),
+    A('fx-0035', { status: 'ended', lastSeen: N - M, context: big, orca: orca('term_e') }),
+    A('fx-0036', { status: 'idle', lastSeen: N - 9 * M, context: big, orca: { ...orca('term_f'), ambiguous: true } }),
+    A('orca:term_g', { source: 'orca', status: 'idle', lastSeen: N - 9 * M, pid: null, context: big, orca: orca('term_g') }),
+    A('fx-0037', { status: 'idle', lastSeen: N - 9 * M, context: { ...big, advice: 'none' }, orca: orca('term_h') }),
+  ];
+  p.window.kadans.render({ agents: rows });
+  html = p.html();
+  assert.doesNotMatch(html, /data-do="compact"/);
+  // a fake click on one of them opens no confirm and sends nothing
+  p.tap({ do: 'compact', id: 'fx-0031' });
+  assert.doesNotMatch(p.html(), /Compact this chat\?/);
+  assert.equal(compacts(p).length, 0);
+});
+
+test('panel: Compact confirms first, then sends exactly one compact with the id (never stop)', () => {
+  const p = loadPanel();
+  p.window.kadans.reset();
+  p.window.kadans.render(p.window.KADANS_FIXTURES.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  const row = rowHtml(p.html(), 'fx-0021');
+  // the question and its reason on the line under the row; the row keeps its meta line, without the tag
+  assert.match(row, /<div class="cwhy"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
+  assert.match(row, /class="pv">Idle 12 min · Tidepool · Opus · 152k ctx · 1 hr 35 min</);
+  assert.match(row, /data-do="compact-go" data-id="fx-0021">Compact<\/button>/);
+  assert.match(row, /data-do="cancel" data-id="fx-0021">Cancel/);
+  assert.equal(compacts(p).length, 0);
+  // Cancel sends nothing
+  p.document.querySelector('[data-do="cancel"][data-id="fx-0021"]').click();
+  assert.doesNotMatch(p.html(), /Compact this chat\?/);
+  assert.equal(compacts(p).length, 0);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
+  assert.deepEqual(JSON.parse(JSON.stringify(compacts(p))), [{ action: 'compact', id: 'fx-0021' }]);
+  assert.equal(p.sent.filter((m) => m.action === 'stop').length, 0);
+  // a second click on the same confirm (double click) sends nothing more
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
+  assert.equal(compacts(p).length, 1);
+});
+
+test('panel: a confirm left open closes when the chat starts working, and its Compact then sends nothing', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  const working = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, status: 'working', context: { ...a.context, advice: 'none', why: null } } : a));
+  p.window.kadans.render({ agents: working });
+  assert.doesNotMatch(p.html(), /Compact this chat\?/);
+  p.tap({ do: 'compact-go', id: 'fx-0021' });
+  assert.equal(compacts(p).length, 0);
+});
+
+test('panel: one compact in flight at a time; Compacting… until the context shrinks or 90 s pass', () => {
+  const clock = { now: 5_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
+  let html = p.html();
+  assert.match(rowHtml(html, 'fx-0021'), /class="pv">Compacting… · Tidepool/);
+  assert.doesNotMatch(rowHtml(html, 'fx-0021'), /class="tag"/);
+  // no Compact anywhere while one is in flight, and a forged click is ignored
+  assert.doesNotMatch(html, /data-do="compact"/);
+  p.tap({ do: 'compact', id: 'fx-0022' });
+  p.tap({ do: 'compact-go', id: 'fx-0022' });
+  assert.equal(compacts(p).length, 1);
+  // a refresh with the same context keeps it running
+  clock.now += 30_000;
+  p.window.kadans.render({ agents: F.compact.agents });
+  assert.match(p.html(), /Compacting…/);
+  // the context got smaller: done, Compact is back on the other row
+  const smaller = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, context: { tokens: 21000, window: 200000, pct: 10.5, advice: 'none', why: null } } : a));
+  p.window.kadans.render({ agents: smaller });
+  html = p.html();
+  assert.doesNotMatch(html, /Compacting…/);
+  assert.match(rowHtml(html, 'fx-0021'), /21k ctx/);
+  assert.match(html, /data-do="compact" data-id="fx-0022"/);
+
+  // the other way: nothing changes for 90 s -> a quiet note, then Compact may be offered again
+  p.document.querySelector('[data-do="compact"][data-id="fx-0022"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0022"]').click();
+  assert.deepEqual(compacts(p).map((m) => m.id), ['fx-0021', 'fx-0022']);
+  assert.ok(timers.some((t) => t.ms >= 90_000), 'a re-render is scheduled at the deadline');
+  clock.now += 91_000;
+  p.window.kadans.render({ agents: smaller });
+  html = p.html();
+  assert.match(rowHtml(html, 'fx-0022'), /<span class="warn" title="[^"]*">Compact not confirmed<\/span>/);
+  assert.match(html, /data-do="compact" data-id="fx-0022"/);
+  clock.now += 9000;
+  p.window.kadans.render({ agents: smaller });
+  assert.doesNotMatch(p.html(), /Compact not confirmed/);
+  assert.equal(compacts(p).length, 2);
+});
+
+test('panel: Suggest compact Off hides every hint and button; the segment sets compact.soonPct', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact_off);
+  let html = p.html();
+  assert.doesNotMatch(html, /class="tag"/);
+  assert.doesNotMatch(html, /data-do="compact"/);
+  assert.match(html, /152k ctx/); // the number stays
+  p.tap({ do: 'compact', id: 'fx-0021' });
+  assert.doesNotMatch(p.html(), /Compact this chat\?/);
+  // Settings: Off is pressed and can be picked (the CLI stores 101 since k12)
+  p.tap({ do: 'settings' });
+  html = p.html();
+  assert.match(html, /aria-label="Suggest compact"/);
+  assert.match(html, /<button aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="101" [^>]*>Off<\/button>/);
+  assert.doesNotMatch(html, /not available yet/);
+  // with 40 % stored: 40 % pressed; picking 60 % sends one config-set through the existing path
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.tap({ do: 'settings' });
+  html = p.html();
+  assert.match(html, /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="40"/);
+  p.tap({ do: 'set', k: 'compact.soonPct', v: '60' });
+  assert.deepEqual(JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'config-set'))), [{ action: 'config-set', key: 'compact.soonPct', value: '60' }]);
+  assert.match(p.html(), /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="60"/);
+});
+
+// ---------- k12: Off, action results, Compacted ----------
+
+test('panel: picking Off sends config-set compact.soonPct 101, and the hints go away', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.tap({ do: 'settings' });
+  assert.match(p.html(), /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="40"/);
+  p.tap({ do: 'set', k: 'compact.soonPct', v: '101' });
+  assert.deepEqual(JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'config-set'))), [{ action: 'config-set', key: 'compact.soonPct', value: '101' }]);
+  assert.match(p.html(), /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="101"[^>]*>Off</);
+  p.window.kadans.render({ config: { ...F.compact.config, compact: { ...F.compact.config.compact, soonPct: 101 } } });
+  p.tap({ do: 'back' });
+  assert.doesNotMatch(p.html(), /class="tag"|data-do="compact"/);
+});
+
+test('panel: a refused compact shows the CLI reason on its row for 8 s, clears the in-flight state and offers Compact again', () => {
+  const clock = { now: 7_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
+  assert.match(rowHtml(p.html(), 'fx-0021'), /Compacting…/);
+  const why = 'not compacted: That chat has unsent text: type /compact there yourself';
+  p.window.kadans.result({ action: 'compact', id: 'fx-0021', ok: false, why });
+  let row = rowHtml(p.html(), 'fx-0021');
+  assert.match(row, new RegExp(`class="pv"><span class="warn" title="${why}" style="[^"]*">${why}</span></div>`));
+  assert.doesNotMatch(row, /Compacting…|class="tag"/);
+  assert.match(row, /aria-label="Refactor the sync worker\. not compacted: That chat/);
+  assert.match(p.html(), /data-do="compact" data-id="fx-0022"/); // not in flight any more
+  assert.ok(timers.some((t) => t.ms <= 8100 && t.ms >= 8000), 'a re-render is scheduled when the reason expires');
+  // other rows are untouched
+  assert.match(rowHtml(p.html(), 'fx-0022'), /92k ctx/);
+  clock.now += 8_100;
+  p.window.kadans.render({});
+  row = rowHtml(p.html(), 'fx-0021');
+  assert.doesNotMatch(row, /unsent text/);
+  assert.match(row, /Compact\?<\/span> 152k ctx/);
+});
+
+test('panel: a refused stop shows its reason on the row; a successful result, an unknown action and a junk payload change nothing', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  const before = p.html();
+  for (const r of [{ action: 'stop', id: 'fx-0021', ok: true, why: '' }, { action: 'config-set', id: 'compact.soonPct', ok: false, why: 'x' },
+    { action: 'stop', id: 'nope', ok: false, why: 'x' }, null, 'x', 5, {}, { action: 'stop', ok: false }]) p.window.kadans.result(r);
+  assert.equal(p.html(), before);
+  p.tap({ do: 'close', id: 'fx-0021' });
+  p.tap({ do: 'stop', id: 'fx-0021' });
+  assert.deepEqual(p.sent.filter((m) => m.action === 'stop').map((m) => m.id), ['fx-0021']);
+  p.window.kadans.result({ action: 'stop', id: 'fx-0021', ok: false, why: '   ' });
+  assert.match(rowHtml(p.html(), 'fx-0021'), /<span class="warn" title="It did not work" style="[^"]*">It did not work<\/span>/);
+  p.window.kadans.result({ action: 'stop', id: 'fx-0021', ok: false, why: 'a'.repeat(500) });
+  assert.match(rowHtml(p.html(), 'fx-0021'), new RegExp(`title="${'a'.repeat(200)}" style="[^"]*">${'a'.repeat(200)}</span>`));
+  // a new click clears the old reason
+  p.tap({ do: 'stop', id: 'fx-0021' });
+  assert.doesNotMatch(rowHtml(p.html(), 'fx-0021'), /class="warn"/);
+});
+
+test('panel: the result callback shows a hostile reason as text only, also when it arrives as a JSON literal in script source', () => {
+  const p = loadPanel();
+  const H = p.window.HOSTILE;
+  const nasty = `${H.QUOTE} \\ ${H.SCRIPT}\n"${H.IMG}\u2028end`;
+  p.window.kadans.reset();
+  p.window.kadans.render(p.window.KADANS_FIXTURES.hostile);
+  // what PanelController does: the payload as JSON (U+2028/9 escaped), inside the call's argument list, never as raw text
+  const literal = JSON.stringify({ action: 'compact', id: 'fx-0204', ok: false, why: nasty }).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  assert.ok(!literal.includes('\n') && !literal.includes('\u2028'));
+  vm.runInContext(`window.kadans && window.kadans.result && window.kadans.result(${literal}); true;`, p.window);
+  const html = p.html();
+  assertNoInjection(html, 'result');
+  const row = rowHtml(html, 'fx-0204');
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const shown = nasty.replace(/\s+/g, ' ').trim();
+  assert.ok(row.includes(`<span class="warn" title="${esc(shown)}" style=`) && row.includes(`">${esc(shown)}</span>`), 'the reason, one line, escaped');
+  // the fixture does the same through its own hook
+  p.window.kadans.reset();
+  const f = p.window.KADANS_FIXTURES.hostile_result;
+  p.window.kadans.render(f);
+  f.after(p.document);
+  assertNoInjection(p.html(), 'hostile_result');
+  assert.match(rowHtml(p.html(), 'fx-0204'), /class="warn" title="&lt;img src=x onerror=alert\(1\)&gt; &#39; onmouseover/);
+});
+
+test('panel: Compacted shows on the row once the context dropped after an accepted compact; a successful result alone shows nothing', () => {
+  const clock = { now: 9_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
+  p.window.kadans.result({ action: 'compact', id: 'fx-0021', ok: true, why: '' }); // the CLI typed it
+  assert.match(rowHtml(p.html(), 'fx-0021'), /Compacting… · Tidepool/);
+  assert.doesNotMatch(p.html(), /Compacted/);
+  clock.now += 20_000;
+  const smaller = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, context: { tokens: 21000, window: 200000, pct: 10.5, advice: 'none', why: null } } : a));
+  p.window.kadans.render({ agents: smaller });
+  let row = rowHtml(p.html(), 'fx-0021');
+  assert.match(row, /class="pv">Compacted · Tidepool · Opus · 21k ctx/);
+  assert.doesNotMatch(row, /Compacting…|class="warn"/);
+  clock.now += 8_100;
+  p.window.kadans.render({});
+  assert.doesNotMatch(p.html(), /Compacted/);
+  // the chat ended or vanished instead: nothing to celebrate
+  p.window.kadans.reset();
+  p.window.kadans.render(F.compact);
+  p.document.querySelector('[data-do="compact"][data-id="fx-0022"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="fx-0022"]').click();
+  p.window.kadans.render({ agents: F.compact.agents.filter((a) => a.id !== 'fx-0022') });
+  assert.doesNotMatch(p.html(), /Compacted/);
 });

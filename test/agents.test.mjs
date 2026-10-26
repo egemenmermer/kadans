@@ -367,6 +367,7 @@ test('listAgents: fields, tokens, subagents, Orca match and Orca-only agents; en
     cwd: proj,
     model: 'claude-opus-5',
     tokens: 1160,
+    context: { tokens: 2099, window: 200_000, pct: 1, advice: 'none', why: null }, // 100 + 1000 + 999 cache reads; working
     startedAt: NOW - 10 * MIN,
     lastSeen: a.lastSeen,
     status: 'working',

@@ -17,6 +17,8 @@ kickoff (below, off by default): it runs the `claude` command, which talks to An
 - If Orca is installed: `~/.claude/sessions/<pid>.json` and, for each running `claude` process, the `ORCA_PANE_KEY`
   and `ORCA_TERMINAL_HANDLE` values from its environment (via `ps`), to tell which terminal hosts which session. Only
   those two values are read; nothing else from the environment is kept or logged.
+- `~/.claude/sessions/<pid>.json` (the folder in `CLAUDE_CONFIG_DIR`), also without Orca, to tell which sessions are still
+  open: only `pid`, `sessionId`, `procStart` and `kind` are read; the `*.key` files next to them (peer tokens) are never opened.
 - `~/.claude/settings.json` (or the folder in `CLAUDE_CONFIG_DIR`), when you run `install` or `uninstall`.
 
 ## What it writes
@@ -56,9 +58,15 @@ unless you slowed or paused that session or turned Auto-pace on.
 ## What the app can do
 
 The menu bar app shows a web page in a locked-down view: it loads only local files and ignores navigation elsewhere.
-The page can ask the app for a short list of actions (stop, pace, Auto-pace, start, replace, approve, resize,
+The page can ask the app for a short list of actions (stop, compact, pace, Auto-pace, start, replace, approve, resize,
 refresh). Each runs `kadans` with a fixed argument list, never through a shell, and only with ids from the current agent
 list.
+
+Compact: Kadans can type `/compact` (and Enter) into a chat's Orca terminal (`orca terminal send`), only when you click
+it (or run `kadans agent compact <id>`), and only for an idle chat whose terminal it knows for sure; never on its own, and
+never into any other app. Just before sending it reads that terminal's visible screen once (`orca terminal read --screen`,
+read-only, used only to see whether the input line is empty, never stored or logged) and refuses if you have unsent text
+there, a dialog is open, or the screen cannot be read.
 
 ## Uninstall
 

@@ -30,10 +30,23 @@
       A(`fx-0202${BREAK}`, { project: QUOTE, status: 'needs-you', firstPrompt: IMG }),
       A('orca:term_fx203', { source: 'orca', project: AMP, model: null, tokens: null, pid: null, firstPrompt: null,
         orca: { terminal: null, worktree: SCRIPT, repo: IMG, state: 'working', title: `${IMG} ${QUOTE}`, ambiguous: true } }),
-      A('fx-0204', { project: IMG, status: 'idle', lastSeen: N - 12 * M, firstPrompt: AMP }),
+      A('fx-0204', { project: IMG, status: 'idle', lastSeen: N - 12 * M, firstPrompt: AMP,
+        context: { tokens: 150000, window: 200000, pct: 75, advice: 'now', why: `${IMG}${QUOTE}` },
+        orca: { terminal: 'term_fx204', worktree: AMP, repo: IMG, state: 'idle', title: null, ambiguous: false } }),
+      A('fx-0205', { project: AMP, status: 'idle', lastSeen: N - 9 * M, firstPrompt: QUOTE,
+        context: { tokens: 130000, window: 200000, pct: 65, advice: 'now', why: `${BREAK}${SCRIPT}` } }),
     ],
     // the Replace picker open on the first row: task text and project names go through the menu markup too
     after: (doc) => doc.querySelector('[data-do="replace"][data-id="fx-0201"]')?.click(),
+  };
+  // k12: a refused compact whose reason is hostile text (quote, backslash, tags, a newline) goes through the result callback.
+  K.KADANS_FIXTURES.hostile_result = {
+    ...K.KADANS_FIXTURES.hostile,
+    after: (doc) => {
+      doc.querySelector('[data-do="compact"][data-id="fx-0204"]')?.click();
+      doc.querySelector('[data-do="compact-go"][data-id="fx-0204"]')?.click();
+      K.kadans.result({ action: 'compact', id: 'fx-0204', ok: false, why: `${IMG} ${QUOTE} \\ ${SCRIPT}\n${BREAK}` });
+    },
   };
   // Review screen: hook names, summaries, settings path and command from `kadans install --json` are text as well.
   const hostileInstall = {
