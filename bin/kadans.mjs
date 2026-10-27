@@ -14,11 +14,12 @@ import { notifyBrakeOnce, runPretool, runStop } from '../lib/hooks.mjs';
 import { notify } from '../lib/notify.mjs';
 import { kadansCommand, plan } from '../lib/install.mjs';
 import { configView, setSetting } from '../lib/config.mjs';
-import { compactAgent, findAgent, listAgents, orcaRunner, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
+import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
 import { setTitle } from '../lib/titles.mjs';
 import { MODE_OF, clearAutoPause, ownKey, parseUntil, runPacePost, runPacePre, setAutopace, setPace, windowOf } from '../lib/pace-control.mjs';
 import { checkStartable, describePlan, replaceAgent, startPlan, startTask } from '../lib/launch.mjs';
 import { fetchUsage, readUsageState, renderUsage, usageJson } from '../lib/usage-api.mjs';
+import { renderTick, runTick, tickJson } from '../lib/autogas.mjs';
 import { KICKOFF_ARGV, applySchedule, decide, describeSchedule, kickoffEnv, readKickoffState, runKickoff, schedulePlan } from '../lib/kickoff.mjs';
 
 const HELP = `kadans: pace Claude Code usage limits
@@ -40,6 +41,7 @@ Usage:
   kadans approve <id>     owner approves a task for the throttle    (onayla)
   kadans agents [--json] [--all]   running Claude Code agents (and Orca's); the text list leaves out agents
                       idle for 2+ hours (JSON marks them stale: true); --all lists them and ended ones
+  kadans agents --brief --json     {"working","needsYou","t"} for the menu bar (no transcript reads)
   kadans agent stop <id>     stop one agent (Orca terminal close, else SIGTERM to its pid)
   kadans agent compact <id> [--dry-run]   type /compact into an idle chat's Orca terminal (orca terminal send);
                       refused for working, waiting or ended chats, a chat with unsent text in its input line, and
@@ -59,11 +61,16 @@ Usage:
                       lang en|tr, accounts.<own key>.gas true|false (your own account only),
                       kickoff.enabled true|false, kickoff.from|kickoff.to HH:MM,
                       compact.soonPct 10-95 (% of the context window) or 101 (Off), compact.nowPct 10-95,
-                      compact.idleMin 1-120
+                      compact.idleMin 1-120, autoGas true|false, autoGasMax 1-3, autoGasMinRamGB 0.5-16
   kadans kickoff [--dry-run]   start the next 5-hour window with one tiny Haiku message (claude -p, own account),
                       only if kickoff.enabled, inside kickoff.from-kickoff.to, and the window has ended
   kadans kickoff schedule|unschedule [--apply]   preview (or write and load) the launchd job that runs
                       \`kadans kickoff\` every 15 minutes (~/Library/LaunchAgents/dev.kadans.kickoff.plist)
+  kadans gas tick [--dry-run] [--json]   use spare quota on its own: start the next approved task in a new session
+                      (the task start path) when your own window would end with >= 15% unused and >= 45 min left,
+                      or no window runs (then the start opens one); needs accounts.<own key>.gas and autoGas true;
+                      caps: autoGasMax auto-started tasks running, 10 min apart, a failed task waits for the next window,
+                      autoGasMinRamGB free; --json: {"started": <task id or null>, "why": "<code>"}
   kadans install [--apply] [--json]   preview (or write, with backup) settings.json changes
   kadans uninstall [--apply] preview (or write, with backup) removing them
   kadans --help       show this help
@@ -472,10 +479,20 @@ function autopaceCmd(args, env) {
   return 0;
 }
 
-function agentsCmd(args, env) {
+// `kadans agents`: one `orca worktree ps` (1 s timeout) runs beside Kadans' own work. `--brief`: {"working","needsYou","t"} for
+// the menu bar, from the latest full list when it is at most 2 s old, else counted now without reading any transcript.
+async function agentsCmd(args, env) {
   const { flags } = parseArgs(args);
   const all = Boolean(flags.all || flags.hepsi);
-  const agents = listAgents(kadansHome(env), { run: orcaRunner(env), all, claudeDirs: [configDir(env)] });
+  const home = kadansHome(env);
+  const opts = { env, run: orcaRunner(env, ORCA_TIMEOUT_MS), all, claudeDirs: [configDir(env)] };
+  if (flags.brief) {
+    const now = Date.now();
+    const brief = readBrief(home, now) ?? briefOf(await listAgentsAsync(home, { ...opts, now, all: false, scan: false }), now);
+    process.stdout.write(`${JSON.stringify(brief)}\n`);
+    return 0;
+  }
+  const agents = await listAgentsAsync(home, opts);
   process.stdout.write(flags.json ? `${JSON.stringify(agents, null, 2)}\n` : renderAgents(agents, Date.now(), { all }));
   return 0;
 }
@@ -621,6 +638,30 @@ function kickoffCmd(args, env) {
   return r.ran && !r.ok ? 1 : 0;
 }
 
+// `kadans gas tick [--dry-run] [--json]` (lib/autogas.mjs). Own account only (~/.claude), whatever CLAUDE_CONFIG_DIR says.
+// The dry run stops after the gates: no orca call, no plan, nothing written. Every gate answer exits 0.
+function gasCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos[0] !== 'tick' || pos.length > 1) return fail('usage: kadans gas tick [--dry-run] [--json]');
+  const home = kadansHome(env);
+  const own = ownKey();
+  const start = (id) => {
+    const run = orcaRunner(env, 30_000);
+    const ctx = checkStartable(home, id);
+    const p = startPlan(home, ctx, { run });
+    const r = startTask(home, ctx.task.id, p, { run });
+    return { sessionId: p.sessionId, how: r.how };
+  };
+  const r = runTick(home, loadConfig(home), {
+    own,
+    samples: () => readSamples(home, own),
+    dryRun: Boolean(flags['dry-run']),
+    start,
+  });
+  process.stdout.write(flags.json ? `${JSON.stringify(tickJson(r))}\n` : `${renderTick(r)}\n`);
+  return 0;
+}
+
 // `kadans usage fetch [--json]`: the own account only; prints percentages, never anything from the Keychain.
 async function usageCmd(args, env) {
   const { pos, flags } = parseArgs(args);
@@ -651,12 +692,13 @@ function main(argv, env = process.env) {
     if (cmd === 'ekle') return taskCmd('add', argv.slice(1), env);
     if (cmd === 'liste') return taskCmd('list', argv.slice(1), env);
     if (cmd === 'approve' || cmd === 'onayla') return taskCmd('approve', argv.slice(1), env);
-    if (cmd === 'agents') return agentsCmd(argv.slice(1), env);
+    if (cmd === 'agents') return agentsCmd(argv.slice(1), env).catch((e) => fail(e.message));
     if (cmd === 'agent') return agentCmd(argv[1], argv.slice(2), env);
     if (cmd === 'install' || cmd === 'uninstall') return installCmd(cmd, argv.slice(1), env);
     if (cmd === 'autopace') return autopaceCmd(argv.slice(1), env);
     if (cmd === 'config') return configCmd(argv[1], argv.slice(2), env);
     if (cmd === 'kickoff') return kickoffCmd(argv.slice(1), env);
+    if (cmd === 'gas') return gasCmd(argv.slice(1), env);
   } catch (e) {
     return fail(e.message);
   }

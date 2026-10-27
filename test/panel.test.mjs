@@ -105,7 +105,9 @@ class FNode {
   animate() { return {}; }
 }
 
-// opts.clock: { now } read by Date.now() in the page; opts.timers: an array that collects setTimeout callbacks to run by hand.
+// opts.clock: { now } read by Date.now() in the page; opts.timers: an array that collects setTimeout callbacks to run by hand
+// (k18: each entry gets an id, and clearTimeout marks it `cleared`; nothing is deleted, so tests that fire by ms still work).
+// opts.media: { reduce } read by matchMedia('(prefers-reduced-motion: reduce)'), changeable mid-test.
 function loadPanel(opts = {}) {
   const sent = [];
   const log = [];
@@ -131,7 +133,10 @@ function loadPanel(opts = {}) {
     },
   };
   const timers = opts.timers;
-  const g = { document, console, setTimeout: timers ? (fn, ms) => timers.push({ fn, ms }) : () => 0, clearTimeout: noop, matchMedia: () => ({ matches: false }), CSS: { escape: String },
+  let tid = 0;
+  const g = { document, console, setTimeout: timers ? (fn, ms) => { timers.push({ id: ++tid, fn, ms }); return tid; } : () => 0,
+    clearTimeout: timers ? (id) => { const t = timers.find((x) => x.id === id); if (t) t.cleared = true; } : noop,
+    matchMedia: (q) => ({ matches: /reduce/.test(q) && opts.media?.reduce === true }), CSS: { escape: String },
     webkit: { messageHandlers: { kadans: { postMessage: (m) => sent.push(m) } } } };
   if (opts.clock) g.Date = class extends Date { static now() { return opts.clock.now; } };
   g.window = g; // fixtures assign window.KF / window.KADANS_FIXTURES, which must be globals for the other scripts
@@ -712,4 +717,326 @@ test('panel: a reading older than 10 min shows its age in the muted note instead
   assert.doesNotMatch(p.html(), /Last reading/);
   p.window.kadans.render({ status: p.window.KF.status({ accounts: [p.window.KF.acct({ lastSample: N - 2 * M, fresh: false })] }) });
   assert.match(p.html(), /Last reading 2 min ago/);
+});
+
+// ---------- k18: alive panel ----------
+// The blob wrapper of a keyed row (its first kid), and its class list.
+const blobOf = (p, key) => p.el.find(key)?.kids[0] ?? null;
+const cls = (n) => n?.attrs.get('class') ?? '';
+const pending = (timers) => timers.filter((t) => !t.cleared && !t.ran);
+const fire = (t) => { t.ran = true; t.fn(); };
+
+test('panel: working and needs-you blobs carry their motion class, on the right rows only', () => {
+  const p = loadPanel();
+  const { KF } = p.window;
+  const A = KF.agent;
+  p.window.kadans.reset();
+  p.window.kadans.render({ status: KF.status(), agents: [
+    A('fx-0101', { title: 'Working', subagents: [{ id: 'fx-sub-9', type: 'Explore', status: 'running' }] }),
+    A('fx-0102', { title: 'Waiting', status: 'needs-you' }),
+    A('fx-0103', { title: 'Idle', status: 'idle', lastSeen: KF.N - 5 * KF.M }),
+    A('fx-0104', { title: 'Slowed', pace: { mode: 'slow' } }),
+    A('fx-0105', { title: 'Paused', pace: { mode: 'paused', until: KF.N + 9 * KF.M } }),
+    A('fx-0106', { title: 'Ended', status: 'ended', lastSeen: KF.N - KF.M }),
+  ] });
+  const move = (key) => (/\bbw-(work|need)\b/.exec(cls(blobOf(p, key))) ?? [])[1] ?? null;
+  assert.equal(move('row:fx-0101'), 'work');
+  assert.equal(move('sub:fx-sub-9'), 'work');
+  assert.equal(move('row:fx-0102'), 'need');
+  for (const id of ['fx-0103', 'fx-0104', 'fx-0105', 'fx-0106']) {
+    assert.match(cls(blobOf(p, `row:${id}`)), /^bw$/, `${id} has a still blob`);
+  }
+  // the stagger comes from the id, so the same data gives the same markup (no churn on a refresh)
+  const ph = blobOf(p, 'row:fx-0101').attrs.get('style');
+  assert.match(ph, /^--ph:0(\.\d+)?$/);
+  assert.notEqual(ph, blobOf(p, 'row:fx-0102').attrs.get('style'));
+  // working -> needs you: the blob is swapped for one with the other motion; the row node stays
+  const row = p.el.find('row:fx-0101');
+  p.window.kadans.render({ agents: [A('fx-0101', { title: 'Working', status: 'needs-you' })] });
+  assert.equal(p.el.find('row:fx-0101'), row);
+  assert.equal(move('row:fx-0101'), 'need');
+});
+
+test('panel: one blink timer; each blob on its own 3-9 s, never two at once; off when hidden or with reduced motion', () => {
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const media = { reduce: false };
+  const p = loadPanel({ clock, timers, media });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.blobs);
+  // every visible blob with open eyes: working, needs you, idle, and the idle group's egg
+  let st = p.window.kadans.blinkState();
+  assert.deepEqual(Object.keys(st.due).sort(), ['grp', 'row:fx-0001', 'row:fx-0002', 'row:fx-0004', 'row:fx-0006']);
+  const check = (due, now) => {
+    const ts = Object.values(due).sort((a, b) => a - b);
+    for (const t of ts) assert.ok(t - now >= 3000 && t - now <= 9000, `due in 3-9 s, got ${t - now}`);
+    for (let i = 1; i < ts.length; i++) assert.ok(ts[i] - ts[i - 1] >= 300, 'two blinks never land together');
+  };
+  check(st.due, clock.now);
+  assert.equal(st.armed, true);
+  assert.equal(pending(timers).length, 1, 'one shared timer');
+  assert.match(cls(p.el), /\balive\b/);
+  // a refresh re-arms the same timer (still one) and keeps every due time
+  p.window.kadans.render({ agents: F.blobs.agents });
+  assert.equal(pending(timers).length, 1);
+  assert.deepEqual(p.window.kadans.blinkState().due, st.due);
+  // the first one due blinks alone, and the same timer ends the blink 200 ms later
+  const [firstKey, firstAt] = Object.entries(st.due).sort((a, b) => a[1] - b[1])[0];
+  clock.now = firstAt;
+  fire(pending(timers)[0]);
+  const blinking = ['grp', 'row:fx-0001', 'row:fx-0002', 'row:fx-0004', 'row:fx-0006'].filter((k) => /\bblink\b/.test(cls(blobOf(p, k)) + cls(p.el.find(k)?.kids[0]?.kids?.[0])));
+  assert.equal(blinking.length, 1);
+  assert.equal(blinking[0], firstKey);
+  st = p.window.kadans.blinkState();
+  assert.equal(st.blinking, 1);
+  assert.ok(st.due[firstKey] - clock.now >= 3000, 'its next blink is 3-9 s away again');
+  assert.equal(pending(timers).length, 1);
+  clock.now += 200;
+  fire(pending(timers)[0]);
+  assert.equal(p.window.kadans.blinkState().blinking, 0);
+  assert.doesNotMatch(p.html(), /\bblink\b/);
+  // popover closed: no timer, no loops (alive off); open again: armed
+  p.window.kadans.visible(false);
+  assert.equal(p.window.kadans.blinkState().armed, false);
+  assert.equal(pending(timers).length, 0);
+  assert.doesNotMatch(cls(p.el), /\balive\b/);
+  p.window.kadans.visible(true);
+  assert.equal(p.window.kadans.blinkState().armed, true);
+  assert.match(cls(p.el), /\balive\b/);
+  // reduced motion: nothing is scheduled and nothing loops
+  media.reduce = true;
+  p.window.kadans.render({ agents: F.blobs.agents });
+  assert.equal(p.window.kadans.blinkState().armed, false);
+  assert.equal(pending(timers).length, 0);
+  assert.doesNotMatch(cls(p.el), /\balive\b/);
+});
+
+test('panel: a Settings switch patches only itself (the knob node stays, so it slides); nothing else is rebuilt', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.settings);
+  F.settings.after(p.document);
+  const sw = p.el.find('set:notify');
+  const usage = p.el.find('set:usageApi');
+  const seg = p.el.find('set:lang:en');
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  p.log.length = 0;
+  p.tap({ do: 'set', k: 'notify', v: 'true' });
+  assert.ok(p.log.length > 0);
+  for (const [op, key] of p.log) assert.deepEqual([op, key], ['attr', 'set:notify']);
+  assert.equal(p.el.find('set:notify'), sw);
+  assert.equal(sw.getAttribute('aria-checked'), 'true');
+  assert.equal(sw.getAttribute('data-v'), 'false');
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'notify', value: 'true' });
+  // the config that confirms it changes nothing more
+  p.log.length = 0;
+  p.window.kadans.render({ config: { ...F.settings.config, notify: true } });
+  assert.deepEqual(p.log, []);
+  // a segment: only its two buttons change
+  p.tap({ do: 'set', k: 'lang', v: 'tr' });
+  assert.ok(p.log.every(([op, key]) => op === 'attr' && /^set:lang:(en|tr)$/.test(key)));
+  assert.equal(p.el.find('set:lang:en'), seg);
+  assert.equal(seg.getAttribute('aria-pressed'), 'false');
+  // a minute later only the usage line's text is replaced; its switch and every other control stay
+  p.log.length = 0;
+  p.window.kadans.render({ status: { ...F.settings.status, now: F.settings.status.now + 4 * 60_000 } });
+  assert.equal(p.el.find('set:usageApi'), usage);
+  assert.equal(p.el.find('set:notify'), sw);
+  assert.ok(p.log.length > 0 && p.log.every(([op]) => op === 'replace' || op === 'insert'));
+  assert.match(p.html(), /Every 2 min · last read 5 min ago/);
+});
+
+test('panel: switching accounts keeps the gauge card, its account control and the shared limit; the pressed button moves', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.many);
+  const card = () => p.el.kids[0].kids.find((k) => cls(k) === 'card');
+  const c0 = card();
+  const acct = c0.kids[0];
+  const lim = c0.kids[1];
+  const fill = lim.kids[1].kids[1];
+  assert.equal(cls(fill), 'fill');
+  assert.equal(cls(acct), 'acct');
+  assert.equal(c0.kids.filter((k) => cls(k) === 'lim').length, 2);
+  p.log.length = 0;
+  p.tap({ do: 'account', id: 'bbbbbbbbbbbb' });
+  assert.equal(card(), c0);
+  assert.equal(c0.kids[0], acct);
+  assert.equal(c0.kids[1], lim, 'the 5-hour limit both accounts have keeps its node');
+  assert.equal(lim.kids[1].kids[1], fill, 'and its fill (it glides to the other account\'s value)');
+  assert.equal(c0.kids.filter((k) => cls(k) === 'lim').length, 1);
+  assert.deepEqual(acct.kids.map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+  assert.ok(!p.log.some(([op, key]) => op === 'replace' && key === 'button'), 'no account button replaced');
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'account', id: 'bbbbbbbbbbbb' });
+});
+
+test('panel: Settings "Read usage from Claude" shows fixed strings only (ok, login, error, off) and sets usageApi', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const { N, M } = p.window.KF;
+  const open = (name, patch) => {
+    p.window.kadans.reset();
+    const f = F[name];
+    p.window.kadans.render(patch ? { ...f, ...patch(f) } : f);
+    f.after(p.document);
+    const m = /Read usage from Claude<\/div><div class="d">([^<]*)<\/div>/.exec(p.html());
+    assert.ok(m, `${name}: the usage row is there`);
+    return m[1].replace(/&#39;/g, "'");
+  };
+  const ua = (f, o) => ({ status: { ...f.status, usageApi: { ...f.status.usageApi, ...o } } });
+  assert.equal(open('settings'), 'Every 2 min · last read 1 min ago');
+  assert.equal(open('settings', (f) => ua(f, { lastOk: N - 20_000 })), 'Every 2 min · last read just now');
+  assert.equal(open('settings', (f) => ua(f, { lastOk: null })), 'Every 2 min · not read yet');
+  assert.equal(open('settings_usage_login'), 'Needs a Claude Code login');
+  const at = new Date(N + 8 * M);
+  const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  assert.equal(open('settings_usage_error'), `Couldn't read · trying again at ${hhmm}`);
+  assert.equal(open('settings_usage_error', (f) => ua(f, { nextAt: null })), "Couldn't read · trying again soon");
+  // an error string from the CLI is never shown, whatever it holds
+  const evil = '<img src=x onerror=alert(1)> /Users/me token';
+  const html = (() => { open('settings', (f) => ua(f, { lastError: evil })); return p.html(); })();
+  assert.ok(!html.includes('onerror') && !html.includes('token') && !html.includes('/Users/me'));
+  assert.match(html, /Couldn&#39;t read · trying again soon/);
+  // off: no error line, whatever the last error was
+  assert.equal(open('settings_usage_error', (f) => ({ config: { ...f.config, usageApi: false } })), 'Off · updates only when Claude replies');
+  // the switch sends the existing config-set
+  p.tap({ do: 'set', k: 'usageApi', v: 'true' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'usageApi', value: 'true' });
+  assert.equal(p.el.find('set:usageApi').getAttribute('aria-checked'), 'true');
+});
+
+test('panel: staleReading prefers the account\'s fresh flag; lastSample only gives the age (and is the fallback)', () => {
+  const p = loadPanel();
+  const { staleReading } = p.window.kadans;
+  const now = 10_000_000;
+  assert.equal(staleReading({ fresh: true, lastSample: now - 60 * 60_000 }, now), null);
+  assert.equal(staleReading({ fresh: false, lastSample: now - 2 * 60_000 }, now), 'Last reading 2 min ago');
+  assert.equal(staleReading({ fresh: false }, now), 'No recent reading');
+  assert.equal(staleReading({ lastSample: now - 37 * 60_000 }, now), 'Last reading 37 min ago');
+  assert.equal(staleReading({ lastSample: now - 9 * 60_000 }, now), null);
+});
+
+test('panel: reopening the popover (or coming back from Settings) a minute later does not blink every blob at once', () => {
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.blobs);
+  const spread = () => {
+    const ts = Object.values(p.window.kadans.blinkState().due).sort((a, b) => a - b);
+    for (const t of ts) assert.ok(t - clock.now >= 3000 && t - clock.now <= 9000, `due in 3-9 s, got ${t - clock.now}`);
+    for (let i = 1; i < ts.length; i++) assert.ok(ts[i] - ts[i - 1] >= 300);
+    const live = pending(timers).filter((t) => t.fn.name === 'blinkTick'); // (the slide's own class timer may be pending too)
+    assert.equal(live.length, 1);
+    assert.ok(live[0].ms >= 3000, `the next wake is a normal blink away, got ${live[0].ms} ms`);
+  };
+  p.window.kadans.visible(false);
+  clock.now += 60_000;
+  p.window.kadans.visible(true);
+  spread();
+  // Settings and back, 20 s later
+  p.tap({ do: 'settings' });
+  assert.equal(p.window.kadans.blinkState().armed, false);
+  clock.now += 20_000;
+  p.tap({ do: 'back' }); // motion is on, so Back waits for the slide-out
+  timers.filter((t) => t.ms === 130 && !t.ran && !t.cleared).forEach(fire);
+  spread();
+});
+
+// k25: "Use spare quota on its own" under the own account's gas switch.
+test('panel: Settings "Use spare quota on its own": on / off / disabled strings, patched in place, sets autoGas and autoGasMax', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const line = () => {
+    const m = /Use spare quota on its own<\/div><div class="d">([^<]*)<\/div>/.exec(p.html());
+    return m ? m[1] : null;
+  };
+  const open = (f, config) => {
+    p.window.kadans.reset();
+    p.window.kadans.render(config ? { ...f, config } : f);
+    f.after(p.document);
+  };
+  // the account's spare quota is off: the row is off, says why, and does nothing when tapped
+  open(F.settings_autogas_off);
+  assert.equal(line(), 'Off while “Use spare quota” is off');
+  const sw = p.el.find('set:autoGas');
+  assert.equal(sw.getAttribute('aria-disabled'), 'true');
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.equal(sw.getAttribute('data-do'), null);
+  assert.equal(p.el.find('set:autoGasMax:1'), null);
+  // autoGas true in the config still shows off (and disabled) while gas is off
+  open(F.settings_autogas_off, { ...F.settings_autogas.config, accounts: { aaaaaaaaaaaa: { gas: false } } });
+  assert.equal(line(), 'Off while “Use spare quota” is off');
+  assert.equal(p.el.find('set:autoGas').getAttribute('aria-checked'), 'false');
+  // on, 2 at a time
+  open(F.settings_autogas);
+  assert.equal(line(), 'Starts your next approved task when a window would end unused · max\u00a02\u00a0at\u00a0a\u00a0time');
+  const on = p.el.find('set:autoGas');
+  assert.equal(on.getAttribute('aria-checked'), 'true');
+  assert.equal(on.getAttribute('aria-disabled'), null);
+  assert.equal(p.el.find('set:autoGasMax:2').getAttribute('aria-pressed'), 'true');
+  // autoGasMax 3: one config-set, the segment keeps its nodes and the line follows at once
+  const b1 = p.el.find('set:autoGasMax:1');
+  p.tap({ do: 'set', k: 'autoGasMax', v: '3' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'autoGasMax', value: '3' });
+  assert.equal(p.el.find('set:autoGasMax:1'), b1);
+  assert.equal(p.el.find('set:autoGasMax:3').getAttribute('aria-pressed'), 'true');
+  assert.equal(line(), 'Starts your next approved task when a window would end unused · max\u00a03\u00a0at\u00a0a\u00a0time');
+  // off: config-set autoGas false, the switch node is kept and the line says it is off
+  p.tap({ do: 'set', k: 'autoGas', v: 'false' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'autoGas', value: 'false' });
+  assert.equal(p.el.find('set:autoGas'), on);
+  assert.equal(on.getAttribute('aria-checked'), 'false');
+  assert.equal(line(), 'Starts your next approved task when a window would end unused · off until you turn it on');
+  // the account's gas switched off from elsewhere: the same switch node turns disabled
+  p.window.kadans.render({ config: { ...F.settings_autogas.config, autoGas: false, accounts: { aaaaaaaaaaaa: { gas: false } } } });
+  assert.equal(p.el.find('set:autoGas'), on);
+  assert.equal(on.getAttribute('aria-disabled'), 'true');
+  assert.equal(on.getAttribute('data-do'), null);
+  // a junk autoGasMax shows 1
+  open(F.settings_autogas, { ...F.settings_autogas.config, autoGasMax: 9 });
+  assert.equal(line(), 'Starts your next approved task when a window would end unused · max\u00a01\u00a0at\u00a0a\u00a0time');
+  // an older CLI (no autoGas in config get): no row at all
+  const { autoGas, autoGasMax, autoGasMinRamGB, ...old } = F.settings_autogas.config;
+  open(F.settings_autogas, old);
+  assert.equal(line(), null);
+  assert.equal(p.el.find('set:autoGas'), null);
+});
+
+test('panel: Settings Back reports the main screen\'s height as its slide-in starts, not after it', () => {
+  const clock = { now: 5_000_000 };
+  const timers = [];
+  const rect = FNode.prototype.getBoundingClientRect;
+  // the Settings screen is tall (560), the main panel 400
+  FNode.prototype.getBoundingClientRect = function () { return { height: / tall/.test(this.attrs.get('class') ?? '') ? 560 : 400 }; };
+  try {
+    const p = loadPanel({ clock, timers });
+    const F = p.window.KADANS_FIXTURES;
+    p.window.kadans.reset();
+    p.window.kadans.render({ ...F.settings, after: undefined });
+    const sizes = () => p.sent.filter((m) => m.action === 'size').map((m) => m.height);
+    assert.deepEqual(sizes(), [400]);
+    p.tap({ do: 'settings' });
+    assert.deepEqual(sizes(), [400, 560]); // push: taller at once, the popover grows with the slide
+    clock.now += 2000;
+    timers.forEach((t) => { t.ran = true; }); // the push slide is over
+    p.tap({ do: 'back' }); // the Settings screen slides out (130 ms), then the main panel slides in
+    assert.deepEqual(sizes(), [400, 560]);
+    const out = pending(timers).find((t) => t.ms === 130);
+    assert.ok(out, 'Back waits for the slide-out');
+    clock.now += 130;
+    fire(out);
+    // the shorter height goes out as the slide-in starts, with no size timer left waiting for the slide's end
+    assert.deepEqual(sizes(), [400, 560, 400]);
+    assert.ok(!pending(timers).some((t) => t.fn.name === 'reportSize'), 'no deferred size report');
+    clock.now += 400;
+    pending(timers).forEach(fire);
+    assert.deepEqual(sizes(), [400, 560, 400]);
+  } finally {
+    FNode.prototype.getBoundingClientRect = rect;
+  }
 });

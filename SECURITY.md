@@ -13,9 +13,16 @@ Anthropic as usual.
 - Hook payloads for the session events listed below (session id, working folder, event name, and the start of your
   prompt, cut to about 120 characters).
 - Session transcripts under `~/.claude/projects/`, read-only, for token counts, the model, a session title and the
-  start of the first prompt (to make a title). Nothing is sent anywhere.
+  start of the first prompt (to make a title). Nothing is sent anywhere. To avoid re-reading big transcripts, the
+  transcript scan cache (`agents-cache.json`) keeps up to 2000 characters of each listed session's first prompt, on
+  this Mac only, in a file only you can read (mode 0600), for as long as the session is listed.
 - The process list (`ps`) to tell whether a session is still running.
-- If Orca is installed: its `orca` command, to list agent terminals and their titles.
+- If Orca is installed: its `orca` command, read-only, to list its agents' states (`orca worktree ps`, once per refresh)
+  and, only when a pane's terminal handle is not known yet, its terminals (`orca terminal list`, at most once a minute).
+  Only the state, its start time, the pane and terminal ids and the worktree path are kept; the prompt, preview, last
+  message and tool input that Orca also returns are not stored, logged or shown. The tab title is used in memory only,
+  as a row's title when the row has no title of yours or from Claude Code (then `orca terminal list` may run once in that
+  refresh); it is stripped of control characters and never written to disk or logged.
 - If Orca is installed: `~/.claude/sessions/<pid>.json` and, for each running `claude` process, the `ORCA_PANE_KEY`
   and `ORCA_TERMINAL_HANDLE` values from its environment (via `ps`), to tell which terminal hosts which session. Only
   those two values are read; nothing else from the environment is kept or logged.
@@ -29,8 +36,16 @@ Anthropic as usual.
 
 ## What it writes
 
+Private by default: `~/.kadans` is created readable by you only (mode 0700, and tightened once if an older copy was
+wider) and every file Kadans writes in it is 0600, because the event log and caches hold the start of your prompts and
+your working folders. Other accounts on the same Mac cannot read them. Files are written to a temp file and renamed, and
+one lock (with an owner token, so a slow writer never frees another writer's lock) keeps two writers from overwriting
+each other. Titles and prompts are stripped of control and invisible characters before they are stored or printed, so
+a hostile title cannot send escape sequences to your terminal.
+
 - `~/.kadans/` (or `KADANS_HOME`): usage samples (kept 8 days), the session event log (kept 2 days), a transcript scan
-  cache, `config.json`, `pace.json`, `titles.json`, your projects and tasks, and a copy of your previous status line.
+  cache, `orca-panes.json` (Orca pane key -> terminal handle, and per claude process its pane and terminal: ids only), `agents-brief.json` (the agent counts of the
+  latest list for the menu bar), `config.json`, `pace.json`, `titles.json`, your projects and tasks, and a copy of your previous status line.
 - `settings.json`, only with `install --apply` or `uninstall --apply`, and always after a copy to
   `settings.json.kadans-backup-<time>`. Entries from other tools are left alone.
 - `build/` and `~/Applications/Kadans.app`, when you run `scripts/build-app.sh`.
@@ -40,6 +55,8 @@ Anthropic as usual.
 - `~/.kadans/usage-api.json`: time of the last usage reading attempt and success, the failure count, the next allowed
   time and a short error code (such as `http_429`). Never a token.
 - `~/.kadans/kickoff.json` (time and result of the last kickoff) and one `Kickoff` line in the event log per kickoff.
+- `~/.kadans/autogas.json` (time, window id, task id, session id and result of each spare-quota start, kept 2 days) and
+  one `AutoGas` line in the event log per start.
 - `~/Library/LaunchAgents/dev.kadans.kickoff.plist`, only with `kadans kickoff schedule --apply` (removed by
   `kadans kickoff unschedule --apply`). The app never writes it.
 
@@ -51,6 +68,11 @@ when you open it and the last reading is over a minute old). It reads the same n
 
 1. Reads the `Claude Code-credentials` Keychain item (your own account only). The first time, macOS may ask whether to
    allow it.
+   Choose "Allow" if you want to be asked again, or "Always Allow" if you do not. "Always Allow" has a price: it adds
+   `/usr/bin/security` (the tool Kadans calls) to that Keychain item's access list, so afterwards any program you run
+   can read the token through `security` without a prompt. That is how the macOS Keychain works, not something Kadans
+   adds; if you prefer the prompt, click "Allow", or turn the fresh reading off (`usageApi false`) and no Keychain
+   access happens at all. No proxy is used unless you set one up yourself.
 2. If the access token is missing or expires within a minute, it stops there: "login needs a Claude Code session". It
    never uses the refresh token, because refreshing rotates it and could log Claude Code out.
 3. Otherwise it sends one `GET https://api.anthropic.com/api/oauth/usage` (redirects refused, 10 s timeout) and stores the
@@ -70,6 +92,19 @@ environment: so always your own account (`~/.claude`), never another profile, an
 ended (or no sample shows a live one). After a kickoff it waits 5 hours (1 hour after a failed one) before it would run
 again. Each kickoff spends a tiny amount of your quota. The scheduled job (`kickoff schedule --apply`) runs
 `kadans kickoff` every 15 minutes through launchd; on its own it changes nothing while kickoff is off.
+
+## Spare quota on its own (off by default)
+
+`kadans gas tick` (the app runs it every 5 minutes while it is on) can open a new Claude Code session for your next
+approved task when your own 5-hour window would end with quota unused. It is off unless both `accounts.<own key>.gas`
+and `autoGas` are true (`kadans config set autoGas true`). What it can start: only a task you approved (`kadans approve
+<id>`), only on your own account (`~/.claude`: it reads that account's usage whatever `CLAUDE_CONFIG_DIR` says, and the
+session script unsets `CLAUDE_CONFIG_DIR`), never another account profile. It goes through the same path as pressing
+Start (`kadans task start <id>`), at most one task per call, and only with at least 15 % projected unused and 45 minutes
+left (or no 5-hour window running at all, as at night: then the start opens a new window), fewer than `autoGasMax`
+(default 1, at most 3) auto-started tasks still running, no other auto start in the last 10 minutes, and at least
+`autoGasMinRamGB` (default 2.5) of free memory (`vm_stat`, macOS only). A task that fails to start is not tried again
+until the window resets. The session spends your quota like any session you start yourself. `kadans gas tick --dry-run` shows the answer and changes nothing.
 
 ## Hooks it installs
 

@@ -16,12 +16,20 @@
     ...['SessionStart', 'UserPromptSubmit', 'Stop', 'SubagentStart', 'SubagentStop', 'SessionEnd', 'Notification'].map((e) => ch(e, 'hook event'))];
   const config = {
     version: 1, limits: 'auto', targets: { five_hour: 97, seven_day: 98 }, slack: 10, warmup: { minutes: 10, pct: 10 },
-    notify: false, autopace: true, lang: 'en', kickoff: { enabled: false, from: '07:00', to: '23:00' },
+    notify: false, autopace: true, usageApi: true, lang: 'en', kickoff: { enabled: false, from: '07:00', to: '23:00' },
     compact: { soonPct: 40, nowPct: 60, idleMin: 5 }, own: 'aaaaaaaaaaaa', accounts: { aaaaaaaaaaaa: { gas: false } },
+    autoGas: false, autoGasMax: 1, autoGasMinRamGB: 2.5,
   };
-  const twoAccounts = KF.status({ accounts: [KF.acct(), KF.acct({ key: 'cccccccccccc', label: 'Other account', configDir: null, own: false })] });
+  // k18: status --json usageApi (k13): read a minute ago.
+  const usageApi = (o) => Object.assign({ enabled: true, lastOk: KF.N - KF.M, lastError: null, nextAt: null }, o);
+  const twoAccounts = KF.status({ usageApi: usageApi(), accounts: [KF.acct(), KF.acct({ key: 'cccccccccccc', label: 'Other account', configDir: null, own: false })] });
   const openSettings = (doc) => doc.querySelector('[data-do="settings"]')?.click();
   K.KADANS_FIXTURES.settings = { status: twoAccounts, agents: KF.base(), config, install: install([]), after: openSettings };
+  // k18: the usage row when Claude Code has no login, and after a failed read (backing off 8 min).
+  K.KADANS_FIXTURES.settings_usage_login = { status: Object.assign({}, twoAccounts, { usageApi: usageApi({ lastOk: null, lastError: 'no_token' }) }),
+    agents: KF.base(), config, install: install([]), after: openSettings };
+  K.KADANS_FIXTURES.settings_usage_error = { status: Object.assign({}, twoAccounts, { usageApi: usageApi({ lastOk: KF.N - 30 * KF.M, lastError: 'http_503', nextAt: KF.N + 8 * KF.M }) }),
+    agents: KF.base(), config, install: install([]), after: openSettings };
   // Settings scrolled to the end, with the Uninstall row open.
   K.KADANS_FIXTURES.settings_end = {
     status: twoAccounts, agents: KF.base(), config, install: install([]),
@@ -52,6 +60,19 @@
       if (b && g) b.scrollTop = g.offsetTop - b.offsetTop;
     },
   };
+  // k25: spare quota on, "Use spare quota on its own" on with 2 at a time; scrolled to Accounts.
+  const toAccounts = (doc) => {
+    openSettings(doc);
+    const b = doc.getElementById('k-sbody');
+    const g = [...doc.querySelectorAll('#k-sbody .gl')].find((x) => x.textContent === 'Accounts');
+    if (b && g) b.scrollTop = g.offsetTop - b.offsetTop;
+  };
+  K.KADANS_FIXTURES.settings_autogas = {
+    status: twoAccounts, agents: KF.base(), install: install([]), after: toAccounts,
+    config: { ...config, accounts: { aaaaaaaaaaaa: { gas: true } }, autoGas: true, autoGasMax: 2 },
+  };
+  // k25: the account's spare quota is off, so the row is off and says why.
+  K.KADANS_FIXTURES.settings_autogas_off = { status: twoAccounts, agents: KF.base(), install: install([]), after: toAccounts, config };
   // An older install: the two pace hooks are missing.
   K.KADANS_FIXTURES.hooks = {
     status: KF.status(), agents: KF.base(), config,

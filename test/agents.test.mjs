@@ -371,16 +371,18 @@ test('listAgents: fields, tokens, subagents, Orca match and Orca-only agents; en
     startedAt: NOW - 10 * MIN,
     lastSeen: a.lastSeen,
     status: 'working',
+    stateSince: NOW - 1000, // Orca's state is the source of truth for an Orca-hosted chat (k17): its updatedAt here
+    stateSource: 'orca',
     stale: false,
     account: 'acct',
     pace: { mode: 'none', until: null },
-    title: 'Agents list', // from the Orca tab "✳ Agents list" (no session title in this transcript)
+    title: 'Agents list', // no Claude Code title in the transcript: the Orca tab title again (k24), before the prompt
     titleSource: 'orca',
     firstPrompt: 'Build the agents list for the menu bar',
     subagents: [{ id: 'a1', type: 'Explore', description: 'Find the hook formats', status: 'running' }],
     pid: 4242,
     pidAt: NOW - 9 * MIN, // the SessionStart that recorded the pid
-    orca: { terminal: 'term_A', worktree: 'k3-agents', repo: 'kadans', state: 'working', title: '✳ Agents list' },
+    orca: { terminal: 'term_A', worktree: 'k3-agents', repo: 'kadans', state: 'working', title: null },
   });
   assert.ok(a.lastSeen >= NOW - 7 * MIN);
   assert.deepEqual([o.project, o.cwd, o.firstPrompt, o.orca.terminal, o.orca.ambiguous], ['twitter-bot', '/elsewhere/bot', 'post the batch', 'term_B', false]);
@@ -403,7 +405,7 @@ test('listAgents: fields, tokens, subagents, Orca match and Orca-only agents; en
   assert.deepEqual([s7.tokens, s7.model], [6, 'claude-haiku-5']);
   // a broken Orca is just absent
   assert.equal(listAgents(home, { now: NOW, run: () => 'nope', alive: () => true }).length, 2);
-  assert.match(renderAgents(list, NOW), /^STATUS\s+PROJECT.*\nworking\s+kadans\s+opus-5\s+1k\s+\d+m\s+1\s+s1\s+Agents list\n/);
+  assert.match(renderAgents(list, NOW), /^STATUS\s+PROJECT.*\nworking\s+kadans\s+opus-5\s+1k\s+\d+m\s+1\s+s1\s+Agents list\n/); // the tab title (k24)
 });
 
 test('listAgents: a hosted claude process folds the Orca terminal into the session row; without it nothing changes', () => {

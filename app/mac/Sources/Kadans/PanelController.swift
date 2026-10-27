@@ -62,6 +62,10 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     private var refreshing = false
     /// A full refresh was asked for while another refresh ran; it runs right after.
     private var wantFull = false
+    /// k19: a plain refresh was asked for while another ran (a change notice mid-refresh); it runs right after.
+    private var wantAgain = false
+    /// k19: when the last refresh finished (the host skips a fallback poll right after one).
+    private(set) var lastRefresh: Date = .distantPast
     /// The latest `install --json` said settings.json needs changes; install-apply is refused otherwise.
     private var installChanged = false
     /// Snapshot of a fixture: the page may not reach the CLI at all (no refresh, no actions).
@@ -76,6 +80,10 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     var onSize: ((CGFloat) -> Void)?
     var onClose: (() -> Void)?
     var onStatus: (([String: Any]?) -> Void)?
+    /// k19: the agent list of every refresh (the menu bar's working count while the popover is open).
+    var onAgents: ((Any) -> Void)?
+    /// k25: the config of every full refresh (`config get --json`), so the spare-quota check follows a Settings flip at once.
+    var onConfig: ((Any) -> Void)?
 
     init(theme: String? = nil) {
         self.theme = (theme == "light" || theme == "dark") ? theme : nil
@@ -196,7 +204,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     func refresh(full: Bool = false, completion: (() -> Void)? = nil) {
         guard loaded, !fixtureOnly else { completion?(); return }
         guard !refreshing else {
-            if full { wantFull = true }
+            if full { wantFull = true } else { wantAgain = true }
             completion?()
             return
         }
@@ -217,8 +225,11 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
             }
             DispatchQueue.main.async {
                 self.refreshing = false
+                self.lastRefresh = Date()
                 self.agentIds = Self.ids(in: agents)
+                self.onAgents?(agents)
                 if full { self.installChanged = ((extra["install"] as? [String: Any])?["changed"] as? Bool) == true }
+                if let cfg = extra["config"] { self.onConfig?(cfg) }
                 self.onStatus?(status)
                 var payload: [String: Any] = ["status": status ?? NSNull(), "agents": agents]
                 payload.merge(extra) { _, new in new }
@@ -226,7 +237,11 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 completion?()
                 if self.wantFull {
                     self.wantFull = false
+                    self.wantAgain = false
                     self.refresh(full: true)
+                } else if self.wantAgain {
+                    self.wantAgain = false
+                    self.refresh()
                 }
             }
         }

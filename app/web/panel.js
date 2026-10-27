@@ -87,6 +87,17 @@
       `<g style="fill:${body}${star ? `;stroke:${body}` : ''}">${s}</g><g class="fc" style="fill:var(--ink)">${FACES[face]}</g></svg>`;
   }
   const shapeOf = (id) => SHAPE_NAMES[hash(id) % SHAPE_NAMES.length];
+  // k18: a list blob sits in a wrapper span (bw) that carries the slow motion (working: a calm breathe; needs you: a small
+  // hop every few seconds), so the arrival squish on the svg inside composes with it. move: 'work' | 'need' | null. --ph
+  // (0-1, from the id) staggers the loops so rows never move in step; it is part of the markup, so it never changes on a
+  // refresh. The blink class goes on the wrapper too (.bw.blink .fc). Returned as an item flagged with its face, so the
+  // blink timer finds the blobs in the render tree, not by querying the DOM.
+  const BLINKABLE = new Set(['work', 'wait', 'idle']);
+  function blob(shape, face, size, move = null, id = '') {
+    const ph = move ? ` style="--ph:${(hash(`ph:${id}`) % 1000) / 1000}"` : '';
+    return { html: `<span class="bw${move ? ` bw-${move}` : ''}"${ph}>${avatar(shape, face, size)}</span>`, blob: face };
+  }
+  const MOVE = { working: 'work', 'needs-you': 'need' };
 
   // Distinct blobs: no two visible rows share a shape while a free one is left. Rows are ranked oldest first (startedAt,
   // then id), so a newcomer never takes an older agent's blob; each row starts at its hash shape and, on a collision,
@@ -138,12 +149,12 @@
     dismissed: new Set(), scroll: 0, height: 0, data: null,
     // k4c: screen 'main' | 'settings' | 'review'; from: where Review was opened; pending config picks; apply flow flags.
     screen: 'main', from: 'main', pending: {}, uninstallOpen: false, applyConfirm: false, applying: false, applied: false,
-    applyFailed: false, dragging: false, deferred: false, lastHtml: '', sScroll: 0,
+    applyFailed: false, dragging: false, deferred: false, sScroll: 0, stree: null,
     // k9a motion: firstAt = first paint (never animated); slide = settings push {dir, at};
     // leaving = an exit animation is running. Close idle: closeAll = "Close N idle chats?" open; bulk = the run in progress.
     // k14: tree = the last main-panel item tree (null after a Settings / Review screen: the next main render builds anew);
     // shown = the popover is open (host: kadans.visible); animUntil = when the running enter / leave / slide ends.
-    firstAt: 0, slide: null, leaving: false, hoverKey: null, focusKey: null, tree: null, shown: true, animUntil: 0, sizeTimer: null,
+    firstAt: 0, slide: null, leaving: false, hoverKey: null, focusKey: null, tree: null, shown: true, animUntil: 0, sizeTimer: null, sizeNow: false,
     closeAll: false, closeTimer: null, bulk: null,
     // k10b: the one compact in flight, { id, tokens (context at the click), at, failedAt }.
     // k12: the latest action result for one row, { id, ok, why, at }, shown for RESULT_KEEP_MS.
@@ -192,11 +203,24 @@
     patchStats.made += 1;
     return t.content.firstChild;
   }
+  // k18: a new shell is parsed once from its whole markup and its items are bound to the nodes the parser made (one
+  // parse for a whole screen, not one per shell). If the node count does not line up (an item that parses to more than
+  // one node, or the test DOM), each item is built on its own as before.
   function build(it) {
     if (!isShell(it)) return (it.node = make(it.html));
+    const whole = make(markup(it));
+    if (whole && bind(it, whole)) return whole;
     const n = make(`<${it.tag}${attrStr(it.attrs)}></${it.tag}>`);
     for (const k of it.kids) n.appendChild(build(k));
     return (it.node = n);
+  }
+  function bind(it, node) {
+    it.node = node;
+    if (!isShell(it)) return true;
+    const c = node.childNodes;
+    if (!c || c.length !== it.kids.length) return false;
+    for (let i = 0; i < c.length; i++) if (!bind(it.kids[i], c[i])) return false;
+    return true;
   }
   function swapClasses(node, from, to) {
     const a = new Set(String(from ?? '').split(' ').filter(Boolean));
@@ -216,6 +240,7 @@
       if (o.attrs[k] === v) continue;
       if (k === 'class') swapClasses(node, o.attrs.class, v);
       else node.setAttribute(k, v);
+      if (k === 'value' && node.tagName === 'INPUT') node.value = v; // a moved range no longer follows its attribute
       patchStats.attrs += 1;
     }
     if (n.keyed) patchKeyed(node, o.kids, n.kids, ctx, n.fade === true);
@@ -320,22 +345,23 @@
   // The fill and the projection tail are full-width layers slid into place with translateX (the track clips them), so a
   // new value glides there by a CSS transition on transform alone: the nodes stay across refreshes (keyed patch), no
   // reflow, no width animation. The tail sits under the fill and is always there (hidden under the fill when no tail).
-  function limitItem(l, now, showTarget, stale) {
+  function limitItem(l, now, showTarget, stale, key) {
     const pct = clamp(Math.round(finite(l.pct) ? l.pct : 0), 0, 100);
     const brakeLike = l.state === 'brake' || l.state === 'early';
     const hasTail = !l.ended && l.state !== 'unknown' && finite(l.projection) && (brakeLike || !thin(l));
     const end = brakeLike ? 100 : hasTail ? clamp(Math.round(l.projection), pct, 100) : pct;
-    const tail = S('div', { class: `ahead ${brakeLike ? 'orange' : 'blue'}`, style: `transform:translateX(${end - 100}%)` });
-    const fill = S('div', { class: 'fill', style: `transform:translateX(${pct - 100}%)` });
+    const tail = S('div', { class: `ahead ${brakeLike ? 'orange' : 'blue'}`, style: `transform:translateX(${end - 100}%)` }, [], 'tail');
+    const fill = S('div', { class: 'fill', style: `transform:translateX(${pct - 100}%)` }, [], 'fill');
+    // keyed (k18): the target mark comes and goes with the number of limits (account switch) without rebuilding the fill
     const mark = showTarget && finite(l.target)
-      ? `<div class="mark" style="left:${clamp(l.target, 0, 100)}%" title="Target ${Math.round(l.target)}%"></div>` : '';
+      ? { key: 'mark', html: `<div class="mark" style="left:${clamp(l.target, 0, 100)}%" title="Target ${Math.round(l.target)}%"></div>` } : '';
     const name = limitName(l.name);
     const pace = !stale && finite(l.needle) && finite(l.projection) && !l.ended
       ? `Pace ${l.needle.toFixed(2)} pts/min · about ${Math.round(l.projection)}% at the reset` : null;
     const track = S('div', { class: 'track', role: 'meter', 'aria-label': `${name} used`, 'aria-valuemin': 0, 'aria-valuemax': 100,
-      'aria-valuenow': pct, title: pace }, [tail, fill, mark]);
+      'aria-valuenow': pct, title: pace }, [tail, fill, mark], undefined, true);
     return S('div', { class: 'lim' }, [`<div class="lrow"><span class="k">${esc(name)}</span><span class="r">${esc(resetText(l, now))}</span>` +
-      `<span class="p">${pct}%</span></div>`, track]);
+      `<span class="p">${pct}%</span></div>`, track], key);
   }
 
   // Stale reading: the newest usage sample is older than STALE_READING_MS. k13 may add a per-account `fresh` flag;
@@ -418,18 +444,21 @@
     }
     let acct = accounts.find((a) => a.key === view.account) ?? accounts[0];
     view.account = acct.key;
+    // k18: the account control and each limit are keyed shells, so switching accounts patches the pressed button and
+    // glides the fills that both accounts have, instead of replacing the card's insides.
     const seg = accounts.length > 1
-      ? `<div class="acct" role="group" aria-label="Account">${accounts.map((a, i) =>
-        `<button aria-pressed="${a === acct}" data-do="account" data-id="${esc(a.key)}" title="${esc(a.label ?? '')}">${esc(accountLabel(a, i, accounts))}</button>`).join('')}</div>`
+      ? S('div', { class: 'acct', role: 'group', 'aria-label': 'Account' }, accounts.map((a, i) =>
+        S('button', { 'aria-pressed': String(a === acct), 'data-do': 'account', 'data-id': a.key, title: a.label ?? '' },
+          [esc(accountLabel(a, i, accounts))])), 'acct')
       : '';
     const limits = (Array.isArray(acct.limits) ? acct.limits : []).filter((l) => l && l.state !== 'nodata');
     const stale = staleReading(acct, now);
     // A stale reading is not advice: the note says how old it is, in the muted colour, whatever the state was.
     const [dot, note] = stale ? ['gray', stale] : noteFor(acct, limits, status.queue, now);
-    const body = limits.map((l) => limitItem(l, now, limits.length > 1, Boolean(stale)));
+    const body = limits.map((l, i) => limitItem(l, now, limits.length > 1, Boolean(stale), `lim:${i}:${l.name}`));
     const noteHtml = `<div class="note${stale ? ' stale' : ''}"${body.length ? '' : ' style="margin-top:0"'}><i class="dot-${dot}"></i><span>${esc(note)}</span></div>`;
     return { mode: acct.state, gas: acct.state === 'gas' && acct.own === true, stale: Boolean(stale),
-      item: S('div', { class: 'card' }, [seg, ...body, noteHtml], 'gauge') };
+      item: S('div', { class: 'card' }, [seg, ...body, { key: 'note', html: noteHtml }], 'gauge', true) };
   }
 
   // ---------- agents ----------
@@ -667,7 +696,7 @@
       const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}`;
       const key = `row:${a.id}`;
       items.push(S('div', { class: cls, tabindex: 0, 'data-key': key, title: tip,
-        'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}` }, [avatar(shapeFor(a.id), FACE[st]),
+        'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}` }, [blob(shapeFor(a.id), FACE[st], 30, MOVE[st] ?? null, a.id),
         `<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${tag}${pre}${esc(line)}</div></div>`, actsHtml(a, st, tasks)], key));
       if (askC) {
         items.push({ key: `why:${a.id}`, html: `<div class="cwhy" data-key="why:${esc(a.id)}"><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>` });
@@ -682,8 +711,9 @@
       for (const s of Array.isArray(a.subagents) ? a.subagents : []) {
         if (s.status !== 'running') continue;
         const name = s.description || s.type || 'Subagent';
-        items.push({ key: `sub:${s.id}`, html: `<div class="row child" tabindex="0" data-key="sub:${esc(s.id)}" title="${esc(name)}" aria-label="${esc(`Subagent: ${name}`)}">` +
-          `${avatar(shapeFor(s.id), 'work', 22)}<div class="tx"><div class="nm">${esc(name)}</div></div></div>` });
+        const key = `sub:${s.id}`;
+        items.push(S('div', { class: 'row child', tabindex: 0, 'data-key': key, title: name, 'aria-label': `Subagent: ${name}` },
+          [blob(shapeFor(s.id), 'work', 22, 'work', s.id), `<div class="tx"><div class="nm">${esc(name)}</div></div>`], key));
       }
     }
     return items;
@@ -774,27 +804,36 @@
     }
   }
 
-  const sItem = (title, desc, ctl, cls = '') =>
-    `<div class="it${cls}"><div class="tx"><div>${title}</div>${desc ? `<div class="d">${desc}</div>` : ''}</div>${ctl ?? ''}</div>`;
+  // k18: Settings and Review are item trees patched in place like the main panel (k14): a switch, a segment or a slider
+  // keeps its node, so a flipped switch's knob slides and nothing else on the screen is rebuilt. Every kid of a keyed
+  // shell needs its own key.
+  const sItem = (key, title, desc, ctl, cls = '') =>
+    S('div', { class: `it${cls}` }, [`<div class="tx"><div>${title}</div>${desc ? `<div class="d">${desc}</div>` : ''}</div>`, ctl ?? ''], key);
+  // disabled: shown off, with no action. With a key it keeps its data-key (k25), so an enable / disable flip patches the
+  // same node instead of replacing it.
   function sSwitch(key, label, disabled) {
     const on = cfgVal(key) === 'true';
     return disabled
-      ? `<button class="sw" role="switch" aria-checked="false" aria-disabled="true" aria-label="${esc(label)} (not available)"></button>`
-      : `<button class="sw" role="switch" aria-checked="${on}" aria-label="${esc(label)}" data-do="set" data-k="${esc(key)}" ` +
-        `data-v="${!on}" data-key="set:${esc(key)}"></button>`;
+      ? S('button', { class: 'sw', role: 'switch', 'aria-checked': 'false', 'aria-disabled': 'true', 'aria-label': `${label} (not available)`,
+        ...(key ? { 'data-key': `set:${key}` } : {}) })
+      : S('button', { class: 'sw', role: 'switch', 'aria-checked': String(on), 'aria-label': label, 'data-do': 'set', 'data-k': key,
+        'data-v': String(!on), 'data-key': `set:${key}` });
   }
+  const segBtn = (key, v, t, on) =>
+    S('button', { 'aria-pressed': String(on), 'data-do': 'set', 'data-k': key, 'data-v': v, 'data-key': `set:${key}:${v}` }, [esc(t)]);
   function sSeg(key, label, opts) {
     const cur = cfgVal(key);
-    return `<div class="seg" role="group" aria-label="${esc(label)}">${opts.map(([v, t]) =>
-      `<button aria-pressed="${cur === v}" data-do="set" data-k="${esc(key)}" data-v="${esc(v)}" data-key="set:${esc(key)}:${esc(v)}">${esc(t)}</button>`).join('')}</div>`;
+    return S('div', { class: 'seg', role: 'group', 'aria-label': label }, opts.map(([v, t]) => segBtn(key, v, t, cur === v)));
   }
+  // A slider row: the input is a shell, so a confirmed value is patched onto the node the owner just moved (patchShell
+  // also sets its .value); the number and the description are markup next to it.
   function sSlider(key, title, desc, min, max, unit) {
     const raw = Number(cfgVal(key));
     const v = Number.isFinite(raw) ? clamp(raw, min, max) : min;
     const fill = Math.round(((v - min) / (max - min)) * 1000) / 10;
-    return `<div class="it col"><div class="lr"><span>${esc(title)}</span><span class="num" data-num="${esc(key)}">${v}${unit}</span></div>` +
-      `<input type="range" min="${min}" max="${max}" step="1" value="${v}" aria-label="${esc(title)}" data-set="${esc(key)}" style="--p:${fill}%" ` +
-      `data-unit="${esc(unit)}" data-key="rng:${esc(key)}">${desc ? `<div class="d">${desc}</div>` : ''}</div>`;
+    return S('div', { class: 'it col' }, [`<div class="lr"><span>${esc(title)}</span><span class="num" data-num="${esc(key)}">${v}${unit}</span></div>`,
+      S('input', { type: 'range', min, max, step: 1, value: v, 'aria-label': title, 'data-set': key, style: `--p:${fill}%`, 'data-unit': unit,
+        'data-key': `rng:${key}` }), desc ? `<div class="d">${desc}</div>` : ''], `rng:${key}`);
   }
 
   // "Suggest compact": Off / 40 % / 60 % for compact.soonPct (nowPct and idleMin stay as they are). Off is COMPACT_OFF
@@ -802,10 +841,8 @@
   function compactSeg() {
     const key = 'compact.soonPct';
     const cur = Number(cfgVal(key));
-    const opt = (v, t, on) =>
-      `<button aria-pressed="${on}" data-do="set" data-k="${key}" data-v="${v}" data-key="set:${key}:${v}">${esc(t)}</button>`;
-    return `<div class="seg" role="group" aria-label="Suggest compact">${opt(COMPACT_OFF, 'Off', cur >= COMPACT_OFF)}` +
-      `${opt(40, '40 %', cur === 40)}${opt(60, '60 %', cur === 60)}</div>`;
+    return S('div', { class: 'seg', role: 'group', 'aria-label': 'Suggest compact' }, [segBtn(key, String(COMPACT_OFF), 'Off', cur >= COMPACT_OFF),
+      segBtn(key, '40', '40 %', cur === 40), segBtn(key, '60', '60 %', cur === 60)]);
   }
 
   // Whole-hour slider for an "HH:MM" setting (kickoff.from / kickoff.to); sends "HH:00".
@@ -815,12 +852,58 @@
     const m = cur.match(/^([01]\d|2[0-3]):[0-5]\d$/);
     const v = m ? Number(m[1]) : 0;
     const fill = Math.round((v / 23) * 1000) / 10;
-    return `<div class="it col"><div class="lr"><span>${esc(title)}</span><span class="num" data-num="${esc(key)}">${esc(m ? cur : '–')}</span></div>` +
-      `<input type="range" min="0" max="23" step="1" value="${v}" aria-label="${esc(title)}" aria-valuetext="${esc(m ? cur : hh(v))}" ` +
-      `data-set="${esc(key)}" data-fmt="hour" style="--p:${fill}%" data-key="rng:${esc(key)}"></div>`;
+    return S('div', { class: 'it col' }, [`<div class="lr"><span>${esc(title)}</span><span class="num" data-num="${esc(key)}">${esc(m ? cur : '–')}</span></div>`,
+      S('input', { type: 'range', min: 0, max: 23, step: 1, value: v, 'aria-label': title, 'aria-valuetext': m ? cur : hh(v), 'data-set': key,
+        'data-fmt': 'hour', style: `--p:${fill}%`, 'data-key': `rng:${key}` })], `rng:${key}`);
   }
   const sliderText = (r) => (r.dataset.fmt === 'hour' ? hh(r.value) : `${r.value}${r.dataset.unit ?? ''}`);
   const sliderValue = (r) => (r.dataset.fmt === 'hour' ? hh(r.value) : String(r.value));
+
+  // k18: "Read usage from Claude" (config usageApi, k13). The muted line is one of a few fixed strings built from times
+  // and the error code in status --json usageApi; no error text from the CLI ever reaches the page.
+  const USAGE_EVERY = 'Every 2 min';
+  function usageLine(on, ua, now) {
+    if (!on) return 'Off · updates only when Claude replies';
+    const err = typeof ua?.lastError === 'string' && ua.lastError ? ua.lastError : null;
+    if (err === 'no_token') return 'Needs a Claude Code login';
+    if (err) return finite(ua.nextAt) && ua.nextAt > now ? `Couldn't read · trying again at ${hhmm(ua.nextAt)}` : "Couldn't read · trying again soon";
+    if (!finite(ua?.lastOk)) return `${USAGE_EVERY} · not read yet`;
+    const age = now - ua.lastOk;
+    return age < MIN ? `${USAGE_EVERY} · last read just now` : `${USAGE_EVERY} · last read ${dur(age)} ago`;
+  }
+  function usageItem(d) {
+    const ua = d.status?.usageApi && typeof d.status.usageApi === 'object' ? d.status.usageApi : null;
+    if (cfgVal('usageApi') === undefined && !ua) return null; // an older CLI: no such setting
+    const now = finite(d.status?.now) ? d.status.now : Date.now();
+    const on = cfgVal('usageApi') !== undefined ? cfgVal('usageApi') === 'true' : ua?.enabled === true;
+    const sw = sSwitch('usageApi', 'Read usage from Claude');
+    if (cfgVal('usageApi') === undefined) Object.assign(sw.attrs, { 'aria-checked': String(on), 'data-v': String(!on) });
+    return sItem('usage', 'Read usage from Claude', esc(usageLine(on, ua, now)), sw);
+  }
+
+  // k25: "Use spare quota on its own" (config autoGas, autoGasMax; the app runs `gas tick` every 5 min while it is on).
+  // Only under the own account's gas switch, and off (with the reason) while that switch is off. The 1 / 2 / 3 segment
+  // shows only while it is on. Hidden for an older CLI whose config has no autoGas.
+  const AUTOGAS_WHAT = 'Starts your next approved task when a window would end unused';
+  function autoGasLine(gasOn, on, max) {
+    if (!gasOn) return 'Off while “Use spare quota” is off';
+    // no-break spaces keep the tail on one line (no lone "time" on the last line)
+    return on ? `${AUTOGAS_WHAT} · max\u00a0${max}\u00a0at\u00a0a\u00a0time` : `${AUTOGAS_WHAT} · off until you turn it on`;
+  }
+  function autoGasItems(ownKey) {
+    if (cfgVal('autoGas') === undefined) return [];
+    const gasOn = cfgVal(`accounts.${ownKey}.gas`) === 'true';
+    const on = gasOn && cfgVal('autoGas') === 'true';
+    const raw = Number(cfgVal('autoGasMax'));
+    const max = Number.isInteger(raw) && raw >= 1 && raw <= 3 ? raw : 1;
+    const items = [sItem('autogas', 'Use spare quota on its own', esc(autoGasLine(gasOn, on, max)),
+      sSwitch('autoGas', 'Use spare quota on its own', !gasOn))];
+    if (on) {
+      items.push(sItem('autogas-max', 'Tasks at a time', '',
+        S('div', { class: 'seg', role: 'group', 'aria-label': 'Tasks at a time' }, ['1', '2', '3'].map((v) => segBtn('autoGasMax', v, v, String(max) === v)))));
+    }
+    return items;
+  }
 
   // Hook changes grouped by hook kind (the event hook alone covers seven events).
   function hookGroups(install) {
@@ -849,12 +932,23 @@
       `<span class="ttl">${esc(title)}</span></div>`;
   }
 
-  function settingsHtml() {
+  const topItem = (title) => ({ key: 'top', html: topBar(title) });
+  // A group: its label and its card, both keyed; items that come and go (kickoff hours, the uninstall command) rise in
+  // and fade out like rows.
+  function sGroup(id, label, items) {
+    const g = S('div', { class: 'sgrp' }, items, `g:${id}`, true);
+    g.fade = true;
+    return [{ key: `gl:${id}`, html: `<div class="gl">${esc(label)}</div>` }, g];
+  }
+  const screenShell = (screen, cls, label, kids) =>
+    S('div', { class: `panel screen${cls}`, role: 'dialog', 'aria-label': label }, kids, `screen:${screen}`, true);
+
+  function settingsTree() {
     const d = view.data ?? {};
     const cfg = d.config && typeof d.config === 'object' ? d.config : null;
     if (!cfg) {
-      return topBar('Settings') + '<div class="sbody"><div class="card"><div class="msg"><div><div class="t">Loading settings…</div>' +
-        '<div class="s">If this stays, <span class="code">kadans config get</span> is failing.</div></div></div></div></div>';
+      return screenShell('settings', ' tall', 'Kadans settings', [topItem('Settings'), { key: 'loading', html: '<div class="sbody"><div class="card"><div class="msg"><div><div class="t">Loading settings…</div>' +
+        '<div class="s">If this stays, <span class="code">kadans config get</span> is failing.</div></div></div></div></div>' }]);
     }
     const accounts = Array.isArray(d.status?.accounts) ? d.status.accounts : [];
     const own = accounts.find((a) => a?.own);
@@ -868,106 +962,114 @@
     const inst = d.install && typeof d.install === 'object' ? d.install : null;
     const n = hooksNeeded(inst);
     const cmd = typeof inst?.command === 'string' && inst.command ? inst.command : 'node bin/kadans.mjs';
-    let h = topBar('Settings') + '<div class="sbody" id="k-sbody">';
+    const body = [];
 
-    h += '<div class="gl">Limits</div><div class="sgrp">' +
-      sItem('Windows to watch', '', sSeg('limits', 'Windows to watch', LIMIT_OPTS)) +
-      `<div class="d sub">Auto uses what Claude Code reports.${today}</div>` +
-      sSlider('targets.five_hour', '5-hour target', 'Aim to end the window this full.', 50, 100, '%') +
-      sSlider('targets.seven_day', '7-day target', '', 50, 100, '%') +
-      sSlider('slack', 'Spare margin', 'Spare quota counts only when the projection is this far below target.', 0, 30, ' pts') +
-      sSlider('warmup.minutes', 'Warm-up time', '', 0, 60, ' min') +
-      sSlider('warmup.pct', 'Warm-up usage', `No brake before ${esc(m ?? '?')} min into a window or ${esc(p ?? '?')}% used.`, 0, 50, '%') +
-      '</div>';
+    body.push(...sGroup('limits', 'Limits', [
+      usageItem(d),
+      sItem('windows', 'Windows to watch', '', sSeg('limits', 'Windows to watch', LIMIT_OPTS)),
+      { key: 'windows-sub', html: `<div class="d sub">Auto uses what Claude Code reports.${today}</div>` },
+      sSlider('targets.five_hour', '5-hour target', 'Aim to end the window this full.', 50, 100, '%'),
+      sSlider('targets.seven_day', '7-day target', '', 50, 100, '%'),
+      sSlider('slack', 'Spare margin', 'Spare quota counts only when the projection is this far below target.', 0, 30, ' pts'),
+      sSlider('warmup.minutes', 'Warm-up time', '', 0, 60, ' min'),
+      sSlider('warmup.pct', 'Warm-up usage', `No brake before ${esc(m ?? '?')} min into a window or ${esc(p ?? '?')}% used.`, 0, 50, '%'),
+    ].filter(Boolean)));
 
-    h += '<div class="gl">Auto-pace</div><div class="sgrp">' +
-      sItem('Auto-pace', 'Nudges agents when usage runs hot and slows them if the brake holds 10 min. Same as the switch in the panel.',
-        sSwitch('autopace', 'Auto-pace')) +
-      sItem('Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()) + '</div>';
+    body.push(...sGroup('autopace', 'Auto-pace', [
+      sItem('autopace', 'Auto-pace', 'Nudges agents when usage runs hot and slows them if the brake holds 10 min. Same as the switch in the panel.',
+        sSwitch('autopace', 'Auto-pace')),
+      sItem('compact', 'Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()),
+    ]));
 
     const ko = cfg.kickoff && typeof cfg.kickoff === 'object' ? cfg.kickoff : null;
     if (ko) {
       const koOn = cfgVal('kickoff.enabled') === 'true';
-      h += '<div class="gl">Next window</div><div class="sgrp">' +
-        sItem('Start the next window for me', 'When your 5-hour window has ended, Kadans sends Claude one tiny Haiku message, so the next ' +
-          'window starts right away. Your own account only; uses a little quota. Off until you turn it on.',
-        sSwitch('kickoff.enabled', 'Start the next window for me'));
+      const items = [sItem('kickoff', 'Start the next window for me', 'When your 5-hour window has ended, Kadans sends Claude one tiny Haiku message, so the next ' +
+        'window starts right away. Your own account only; uses a little quota. Off until you turn it on.',
+      sSwitch('kickoff.enabled', 'Start the next window for me'))];
       if (koOn) {
-        h += sHour('kickoff.from', 'Allowed from') + sHour('kickoff.to', 'Allowed until') +
-          '<div class="it col un"><div class="d">Kadans does not set up background jobs itself. Run this once in a terminal; it adds a ' +
+        items.push(sHour('kickoff.from', 'Allowed from'), sHour('kickoff.to', 'Allowed until'), { key: 'kickoff-cmd',
+          html: '<div class="it col un"><div class="d">Kadans does not set up background jobs itself. Run this once in a terminal; it adds a ' +
           'macOS job that checks every 15 minutes:</div>' +
           `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} kickoff schedule --apply</pre>` +
-          `<div class="d">Without <span class="code">--apply</span> it only shows the job. To remove it: <span class="code">kickoff unschedule --apply</span>.</div></div>`;
+          `<div class="d">Without <span class="code">--apply</span> it only shows the job. To remove it: <span class="code">kickoff unschedule --apply</span>.</div></div>` });
       }
-      h += '</div>';
+      body.push(...sGroup('kickoff', 'Next window', items));
     }
 
-    h += '<div class="gl">Accounts</div><div class="sgrp">' +
-      (ownKey
-        ? sItem('Use spare quota', 'Your account (<span class="code">~/.claude</span>). Starts approved tasks when quota would go unused. Off until you turn it on.',
+    body.push(...sGroup('accounts', 'Accounts', [
+      ownKey
+        ? sItem('gas', 'Use spare quota', 'Your account (<span class="code">~/.claude</span>). Starts approved tasks when quota would go unused. Off until you turn it on.',
           sSwitch(`accounts.${ownKey}.gas`, 'Use spare quota on your account'))
-        : '') +
-      others.map((a, i) => sItem(`Use spare quota · ${others.length > 1 ? `Other ${i + 1}` : 'Other account'}`,
+        : null,
+      ...(ownKey ? autoGasItems(ownKey) : []),
+      ...others.map((a, i) => sItem(`gas-other:${i}`, `Use spare quota · ${others.length > 1 ? `Other ${i + 1}` : 'Other account'}`,
         '<span class="warn">Not available: Kadans never spends quota on an account that is not yours. Brake and pacing still work.</span>',
-        sSwitch('', 'Use spare quota on another account', true))).join('') + '</div>';
+        sSwitch('', 'Use spare quota on another account', true))),
+    ].filter(Boolean)));
 
-    h += '<div class="gl">Notifications</div><div class="sgrp">' +
-      sItem('Allow notifications', "When you'd run out early, and when Kadans starts or finishes a task. Off by default.",
-        sSwitch('notify', 'Allow notifications')) + '</div>';
+    body.push(...sGroup('notify', 'Notifications', [
+      sItem('notify', 'Allow notifications', "When you'd run out early, and when Kadans starts or finishes a task. Off by default.",
+        sSwitch('notify', 'Allow notifications')),
+    ]));
 
-    h += '<div class="gl">General</div><div class="sgrp">' +
-      sItem('Status line language', 'The line under Claude Code’s prompt.', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']])) +
-      '</div>';
+    body.push(...sGroup('general', 'General', [
+      sItem('lang', 'Status line language', 'The line under Claude Code’s prompt.', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']])),
+    ]));
 
-    h += '<div class="gl">Claude Code</div><div class="sgrp">' +
-      sItem('Hooks in Claude Code', inst ? (n ? `${plural(n, 'hook', 'hooks')} to add or update.` : 'Status line and hooks are installed.') : 'Not checked yet.',
-        n ? '<button class="pill blue" data-do="review" data-key="review">Review</button>' : inst ? '<span class="chip ok">Installed</span>' : '') +
-      sItem('Remove from Claude Code', 'Takes out only Kadans hooks and restores your old status line.',
-        `<button class="pill danger" data-do="uninstall" data-key="uninstall" aria-expanded="${view.uninstallOpen}">Uninstall…</button>`);
+    const cc = [
+      sItem('hooks', 'Hooks in Claude Code', inst ? (n ? `${plural(n, 'hook', 'hooks')} to add or update.` : 'Status line and hooks are installed.') : 'Not checked yet.',
+        n ? '<button class="pill blue" data-do="review" data-key="review">Review</button>' : inst ? '<span class="chip ok">Installed</span>' : ''),
+      sItem('uninstall', 'Remove from Claude Code', 'Takes out only Kadans hooks and restores your old status line.',
+        S('button', { class: 'pill danger', 'data-do': 'uninstall', 'data-key': 'uninstall', 'aria-expanded': String(view.uninstallOpen) }, ['Uninstall…'])),
+    ];
     if (view.uninstallOpen) {
-      h += '<div class="it col un"><div class="d">Kadans does not remove itself from here. Run this in a terminal; it saves a backup of ' +
+      cc.push({ key: 'uninstall-cmd', html: '<div class="it col un"><div class="d">Kadans does not remove itself from here. Run this in a terminal; it saves a backup of ' +
         'settings.json first, then takes out the status line and hooks and puts your old status line back:</div>' +
         `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} uninstall --apply</pre>` +
-        `<div class="d">Without <span class="code">--apply</span> it only shows the change.</div></div>`;
+        `<div class="d">Without <span class="code">--apply</span> it only shows the change.</div></div>` });
     }
-    h += '</div></div>';
-    return h;
+    body.push(...sGroup('cc', 'Claude Code', cc));
+    return screenShell('settings', ' tall', 'Kadans settings', [topItem('Settings'), S('div', { class: 'sbody', id: 'k-sbody' }, body, 'body', true)]);
   }
 
-  function reviewHtml() {
+  // Review: patched at block level (title bar, body, foot), so the confirm in the foot never rebuilds the list above it.
+  function reviewTree() {
     const inst = view.data?.install && typeof view.data.install === 'object' ? view.data.install : null;
     const groups = inst?.changed ? hookGroups(inst) : [];
     const fresh = groups.some((g) => g.hook === 'statusline' && g.kind === 'add');
-    let h = topBar(fresh ? 'Connect to Claude Code' : 'Update hooks') + '<div class="sbody" id="k-sbody">';
+    const kids = [topItem(fresh ? 'Connect to Claude Code' : 'Update hooks')];
+    const done = (b, f) => screenShell('review', '', 'Hooks in Claude Code', [...kids, { key: 'body', html: `<div class="sbody" id="k-sbody">${b}</div>` },
+      f ? { key: 'foot', html: f } : '']);
     if (!inst) {
-      h += '<div class="card"><div class="msg"><div><div class="t">Checking Claude Code settings…</div>' +
-        '<div class="s">If this stays, <span class="code">kadans install</span> is failing (for example a broken settings.json).</div></div></div></div></div>';
-      return h;
+      return done('<div class="card"><div class="msg"><div><div class="t">Checking Claude Code settings…</div>' +
+        '<div class="s">If this stays, <span class="code">kadans install</span> is failing (for example a broken settings.json).</div></div></div></div>');
     }
     if (!groups.length) {
       const msg = view.applied ? 'Applied; a backup of settings.json was saved first.' : 'Nothing to change.';
-      return h + `<div class="card"><div class="msg">${avatar('square', 'done', 26)}<div><div class="t">Hooks are up to date</div>` +
-        `<div class="s">${msg} Claude Code picks the hooks up in new sessions.</div></div></div></div></div>` +
-        '<div class="foot"><button class="pill blue" data-do="back" data-key="done">Done</button></div>';
+      return done(`<div class="card"><div class="msg">${avatar('square', 'done', 26)}<div><div class="t">Hooks are up to date</div>` +
+        `<div class="s">${msg} Claude Code picks the hooks up in new sessions.</div></div></div></div>`,
+      '<div class="foot"><button class="pill blue" data-do="back" data-key="done">Done</button></div>');
     }
-    h += `<p class="lead">Kadans adds ${groups.length === 1 ? 'this' : 'these'} to <span class="code">${esc(tildeFile(inst.file))}</span>. Here is everything that changes.</p>` +
+    const b = `<p class="lead">Kadans adds ${groups.length === 1 ? 'this' : 'these'} to <span class="code">${esc(tildeFile(inst.file))}</span>. Here is everything that changes.</p>` +
       '<div class="chg">' + groups.map((g) => {
         const ev = g.events.length > 1 ? `<div class="ev">${esc(g.events.join(', '))}</div>` : '';
         return `<div class="r"><span class="k ${g.kind === 'add' ? 'add' : 'del'}" aria-hidden="true">${g.kind === 'add' ? '+' : '−'}</span>` +
           `<div class="tx"><div>${esc(own(HOOK_TITLE, g.hook, g.hook ?? g.events[0]))}</div><div class="d">${esc(own(HOOK_DESC, g.hook, g.summary ?? ''))}</div>${ev}</div></div>`;
       }).join('') +
       '<div class="r"><span class="k keep" aria-hidden="true">=</span><div class="tx"><div>Everything else stays</div>' +
-      '<div class="d">Orca’s hooks and your other settings are untouched. A backup is saved first.</div></div></div></div></div>';
-    if (view.applying) h += '<div class="foot"><span class="l">Applying…</span></div>';
+      '<div class="d">Orca’s hooks and your other settings are untouched. A backup is saved first.</div></div></div></div>';
+    let f;
+    if (view.applying) f = '<div class="foot"><span class="l">Applying…</span></div>';
     else if (view.applyConfirm) {
-      h += '<div class="foot"><span class="l">Write settings.json now?</span>' +
+      f = '<div class="foot"><span class="l">Write settings.json now?</span>' +
         '<button class="pill" data-do="apply-cancel" data-key="apply-cancel">Cancel</button>' +
         '<button class="pill blue" data-do="apply-go" data-key="apply-go">Apply</button></div>';
     } else {
-      h += `<div class="foot"><span class="l">${view.applyFailed ? '<span class="warn">Not applied. Run kadans install in a terminal to see why.</span>' : 'Undo any time in Settings'}</span>` +
+      f = `<div class="foot"><span class="l">${view.applyFailed ? '<span class="warn">Not applied. Run kadans install in a terminal to see why.</span>' : 'Undo any time in Settings'}</span>` +
         '<button class="pill blue" data-do="apply" data-key="apply">Apply</button></div>';
     }
-    return h;
+    return done(b, f);
   }
 
   // Shows ~/… instead of the home folder (the page only knows the path from install --json).
@@ -1002,7 +1104,7 @@
       view.applied = !view.applyFailed;
     }
     if (view.screen !== 'main') return renderScreen();
-    view.lastHtml = '';
+    view.stree = null;
     const status = view.data.status ?? null;
     const now = finite(status?.now) ? status.now : Date.now();
     const g = gauge(status, now);
@@ -1035,8 +1137,8 @@
         list.fade = true;
         blocks.push(list);
       } else {
-        blocks.push({ key: 'empty', html: `<div class="empty">${avatar('egg', 'idle')}<div><div class="nm">No agents running</div>` +
-          '<div class="s">They show up here when Claude Code starts one.</div></div></div>' });
+        blocks.push(S('div', { class: 'empty' }, [blob('egg', 'idle', 30), '<div><div class="nm">No agents running</div>' +
+          '<div class="s">They show up here when Claude Code starts one.</div></div>'], 'empty'));
       }
     }
     if (g.mode !== 'no_claude' && g.mode !== 'no_data' && g.mode !== 'error') {
@@ -1061,6 +1163,7 @@
       if (sl?.dir === 'back' && Date.now() - sl.at < ENTER_MS) {
         tree.node.classList.add('back');
         busy(ENTER_MS);
+        view.sizeNow = true; // k25: the popover shrinks with the slide-in, not after it
         setTimeout(() => tree.node.classList.remove('back'), ENTER_MS + 40);
       }
       view.slide = null;
@@ -1141,7 +1244,7 @@
       right = `<button class="pill quiet" data-do="close-all" title="Close the ${plural(closable, 'chat', 'chats')} quiet for 2+ hours">Close all</button>`;
     }
     const toggle = S('button', { class: 'grp-t', 'data-do': 'idle', 'data-key': 'idle-group', 'aria-expanded': view.idleOpen }, [
-      avatar('egg', 'idle', 22), `<span class="tx"><span class="nm">${n} idle</span><span class="pv">${line}</span></span>`,
+      blob('egg', 'idle', 22), `<span class="tx"><span class="nm">${n} idle</span><span class="pv">${line}</span></span>`,
       view.closeAll && closable ? '' : `<span class="chev" aria-hidden="true">${IC.chev}</span>`]);
     return S('div', { class: 'row grp', 'data-key': 'grp' }, [toggle, right], 'grp');
   }
@@ -1180,18 +1283,6 @@
   }
 
   // ---------- motion helpers that touch the DOM ----------
-  // Panel-level push: 'in' for Settings / Review, 'back' for the screen you return to. Survives a rebuild mid-way.
-  function slideIn(dir) {
-    const sl = view.slide;
-    if (!sl || sl.dir !== dir) return ['', ''];
-    const age = Date.now() - sl.at;
-    if (age >= ENTER_MS) {
-      view.slide = null;
-      return ['', ''];
-    }
-    return [` ${dir}`, age > 0 ? ` style="--d:-${Math.round(age)}ms"` : ''];
-  }
-
   // Blobs: a small squish and blink when the pointer or focus reaches a row (once per arrival, not per re-render).
   // Web Animations, so a replay needs no forced reflow; the same keyframes as before (k-squish, k-blink).
   const SQUISH = [{ transform: 'none' }, { transform: 'scale(1.06, .92)', offset: 0.35 }, { transform: 'scale(.98, 1.02)', offset: 0.7 }, { transform: 'none' }];
@@ -1214,61 +1305,110 @@
     if (row) poke(row.querySelector('.av'));
   }
 
-  // Working agents blink now and then: each row gets its own random 4-9 s, all driven by one shared timer that is off
-  // when nothing works, with reduced motion, on the settings screens and while the page is hidden.
-  const blinks = { due: new Map(), timer: null };
-  const nextBlink = (now) => now + 4000 + Math.random() * 5000;
-  function workingBlobs() {
-    return [...root().querySelectorAll('.row[data-key] > .av.f-work')].map((av) => [av.parentElement.dataset.key, av]);
+  // k18: every visible blob with open eyes blinks now and then (working, needs you, idle; subagents and the idle group's
+  // egg too): each on its own random 3-9 s, never two at once (due times stay BLINK_GAP_MS apart), all from ONE timer
+  // that also ends the blinks (no timer per row or per blink). Off on Settings / Review, with reduced motion and while the
+  // popover is closed (kadans.visible(false) or document.hidden). The blobs come from the render tree, not the DOM.
+  // The same gate sets `alive` on #kadans (outside the patched tree): the CSS loops of working / needs-you blobs run only
+  // under it, so they stop with the popover closed.
+  const BLINK_MS = 200;
+  const BLINK_GAP_MS = 300;
+  const blinks = { due: new Map(), on: new Map(), timer: null };
+  function nextBlink(now, key) {
+    let t = 0;
+    for (let i = 0; i < 16; i++) {
+      t = now + 3000 + Math.random() * 6000;
+      let clash = false;
+      for (const [k, d] of blinks.due) if (k !== key && Math.abs(d - t) < BLINK_GAP_MS) { clash = true; break; }
+      if (!clash) break;
+    }
+    return t;
   }
+  // [key, wrapper node] for every blinkable blob on screen: key = the nearest keyed item (row:…, sub:…, grp, empty).
+  function blobNodes(it = view.tree, key = null, out = []) {
+    if (!it) return out;
+    const k = it.key ?? key;
+    if (it.blob && BLINKABLE.has(it.blob) && it.node && k) out.push([k, it.node]);
+    for (const kid of it.kids ?? []) blobNodes(kid, k, out);
+    return out;
+  }
+  const blinkOk = () => view.screen === 'main' && !reduced() && !document.hidden && view.shown;
   function scheduleBlinks() {
     clearTimeout(blinks.timer);
     blinks.timer = null;
-    if (view.screen !== 'main' || reduced() || document.hidden || !view.shown) return;
+    const ok = blinkOk();
+    root().classList.toggle('alive', ok && view.screen === 'main');
     const now = Date.now();
-    const due = new Map();
-    for (const [key] of workingBlobs()) due.set(key, blinks.due.get(key) ?? nextBlink(now));
-    blinks.due = due;
-    if (!due.size) return;
-    blinks.timer = setTimeout(blinkDue, Math.max(50, Math.min(...due.values()) - now));
+    if (!ok) {
+      for (const node of blinks.on.keys()) node.classList.remove('blink');
+      blinks.on.clear();
+      return;
+    }
+    const nodes = blobNodes();
+    const keys = new Set(nodes.map(([k]) => k));
+    for (const k of [...blinks.due.keys()]) if (!keys.has(k)) blinks.due.delete(k);
+    // new blobs get a time; so do times that passed while blinks were off (popover closed, Settings), one by one so the
+    // spread holds: otherwise every overdue blob would blink together on the first tick after reopening
+    for (const k of keys) if (!(blinks.due.get(k) > now)) blinks.due.set(k, nextBlink(now, k));
+    const wake = Math.min(...blinks.due.values(), ...blinks.on.values());
+    if (Number.isFinite(wake)) blinks.timer = setTimeout(blinkTick, Math.max(16, wake - now));
   }
-  function blinkDue() {
+  function blinkTick() {
     blinks.timer = null;
     const now = Date.now();
-    for (const [key, av] of workingBlobs()) {
-      if ((blinks.due.get(key) ?? Infinity) > now + 30) continue;
-      blinks.due.set(key, nextBlink(now));
-      if (av.classList.contains('poke')) continue;
-      av.classList.add('blink');
-      setTimeout(() => av.classList.remove('blink'), 220);
+    for (const [node, end] of blinks.on) {
+      if (end > now + 10) continue;
+      node.classList.remove('blink');
+      blinks.on.delete(node);
+    }
+    for (const [key, node] of blobNodes()) {
+      if ((blinks.due.get(key) ?? Infinity) > now + 10) continue;
+      blinks.due.set(key, nextBlink(now, key));
+      if (blinks.on.has(node) || node.firstElementChild?.classList?.contains('poke')) continue; // mid-squish: skip this one
+      node.classList.add('blink');
+      blinks.on.set(node, now + BLINK_MS);
     }
     scheduleBlinks();
   }
+  // Read-only view for tests and the dev page: is the timer armed, and each blob's next blink.
+  const blinkState = () => ({ armed: blinks.timer !== null, due: Object.fromEntries(blinks.due), blinking: blinks.on.size });
 
-  // Settings and Review: rebuilt only when their markup changes, and never while a slider is held (the 5 s
-  // refresh would drop the drag).
+  // Settings and Review (k18): built as item trees and patched like the main panel, so a flipped switch keeps its node
+  // (the knob slides) and scroll, focus and running transitions stay. Built anew only when the screen changes, with the
+  // push class added on that build and removed by timer (never an attribute, so a patch mid-slide cannot re-time it).
+  // Never patched while a slider is held (the 5 s refresh would drop the drag).
   function renderScreen() {
     if (view.dragging) {
       view.deferred = true;
       return;
     }
-    const inner = view.screen === 'review' ? reviewHtml() : settingsHtml();
-    if (inner === view.lastHtml) return;
+    const tree = view.screen === 'review' ? reviewTree() : settingsTree();
     const el = root();
     const focusKey = keyOf(document.activeElement);
-    const old = document.getElementById('k-sbody');
-    if (old && view.lastHtml) view.sScroll = old.scrollTop;
-    view.lastHtml = inner;
-    const label = view.screen === 'review' ? 'Hooks in Claude Code' : 'Kadans settings';
-    const [pc, ps] = view.slide?.dir === 'in' ? slideIn('in') : slideIn('back');
-    el.innerHTML = `<div class="panel screen${view.screen === 'settings' ? ' tall' : ''}${pc}"${ps} role="dialog" aria-label="${label}">${inner}</div>`;
-    view.tree = null; // the main panel is built anew when it comes back
-    if (pc) busy(ENTER_MS);
+    const before = patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs;
+    const prev = view.stree;
+    let full = false;
+    if (prev?.node && prev.node.parentNode === el && prev.key === tree.key) patchShell(prev, tree, { animate: motionOk(), moved: false });
+    else {
+      full = true;
+      el.innerHTML = '';
+      el.appendChild(build(tree));
+      view.tree = null; // the main panel is built anew when it comes back
+      const sl = view.slide;
+      if (sl && Date.now() - sl.at < ENTER_MS) {
+        tree.node.classList.add(sl.dir);
+        busy(ENTER_MS);
+        if (sl.dir === 'back') view.sizeNow = true;
+        setTimeout(() => tree.node.classList.remove(sl.dir), ENTER_MS + 40);
+      }
+      view.slide = null;
+      const body = document.getElementById('k-sbody');
+      if (body) body.scrollTop = view.sScroll;
+    }
+    view.stree = tree;
+    if (focusKey && !el.contains(document.activeElement)) restoreFocus(el, focusKey);
     scheduleBlinks();
-    const body = document.getElementById('k-sbody');
-    if (body) body.scrollTop = view.sScroll;
-    if (focusKey) restoreFocus(el, focusKey);
-    settle();
+    if (full || patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs !== before) settle();
   }
 
   // dir: 'in' (Settings, Review) or 'back' (the screen you return to).
@@ -1276,7 +1416,6 @@
     if (view.screen === 'main' && view.tree) view.scroll = listNode()?.scrollTop ?? 0;
     view.slide = motionOk() ? { dir, at: Date.now() } : null;
     view.screen = screen;
-    view.lastHtml = '';
     view.sScroll = 0;
     view.applyConfirm = false;
     view.uninstallOpen = false;
@@ -1317,14 +1456,18 @@
 
   // The popover follows the page height: it grows at once (nothing gets cut off), and shrinks only after the running
   // enter / leave / slide is over, so it never resizes under a moving row. The host coalesces what is left.
+  // k25: a Back slide is the exception (view.sizeNow): the screen you return to is reported as its slide-in starts, so
+  // the host's resize runs with the slide (as the Settings push already does) instead of after it.
   function reportSize() {
     clearTimeout(view.sizeTimer);
     view.sizeTimer = null;
+    const now = view.sizeNow === true;
+    view.sizeNow = false;
     const p = root().firstElementChild;
     const h = p ? Math.ceil(p.getBoundingClientRect().height) : 0;
     if (!h || h === view.height) return;
     const wait = view.animUntil - Date.now();
-    if (h < view.height && wait > 0) {
+    if (h < view.height && wait > 0 && !now) {
       view.sizeTimer = setTimeout(reportSize, wait + 20);
       return;
     }
@@ -1460,7 +1603,6 @@
         const k = b.dataset.k;
         if (!k || b.dataset.v == null) return true;
         setValue(k, b.dataset.v);
-        view.lastHtml = '';
         renderScreen();
         return true;
       }
@@ -1598,10 +1740,11 @@
     view.data = {};
     view.pending = {};
     view.screen = 'main';
-    view.lastHtml = '';
+    view.stree = null;
     view.tree = null;
     view.firstAt = 0;
     view.animUntil = 0;
+    view.sizeNow = false;
     view.slide = null;
     view.closeAll = false;
     view.bulk = null;
@@ -1616,7 +1759,7 @@
     view.shown = on !== false;
     scheduleBlinks();
   }
-  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats };
+  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats, blinkState, staleReading };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();

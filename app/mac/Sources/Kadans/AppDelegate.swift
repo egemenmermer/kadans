@@ -1,12 +1,17 @@
 import AppKit
 
-/// Menu bar item + popover. Refreshes every 5 s while the popover is open, 30 s otherwise.
+/// Menu bar item + popover.
+/// k19: pushed, not just polled. A change notice (hook event, usage sample, session file; see ChangeWatcher) refreshes
+/// the panel within ~0.5 s while the popover is open, and the menu bar's working count (`agents --brief --json`) while it
+/// is closed. Fallback polls: panel every 2 s while open; brief every 10 s and `status --json` every 30 s while closed.
+/// Never two CLI runs of the same kind at once (Gate), and the closed-popover runs keep to a CPU budget.
 /// Reads fresh usage (`kadans usage fetch`) every 120 s and on popover open when the last reading is over 60 s old.
+/// k25: the spare-quota check (AutoGas: `gas tick --json` every 5 min and 1 min after each reset) runs on its own timers,
+/// popover open or closed, screen locked or not.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private let panel = PanelController()
-    private var timer: Timer?
     private var lastTitle = ""
     private let blinker = BlobBlinker()
     private var usageTimer: Timer?
@@ -18,6 +23,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     static let usageEvery: TimeInterval = 120
     static let usageStaleOnOpen: TimeInterval = 60
+
+    // k19: push refresh and fallback polls
+    static let openPoll: TimeInterval = 2
+    static let openMinGap: TimeInterval = 1
+    static let briefPoll: TimeInterval = 10
+    static let statusPoll: TimeInterval = 30
+    /// Share of one CPU core the closed-popover brief may use on average (status adds ~0.3 % at one run per 30 s).
+    static let briefCpuShare = 0.005
+    static let briefMinGap: TimeInterval = 3
+    static let briefMaxGap: TimeInterval = 120
+
+    private var watcher: ChangeWatcher?
+    private var pollTimer: Timer?
+    private var statusTimer: Timer?
+    private lazy var panelGate = Gate(minGap: Self.openMinGap) { [weak self] done in
+        guard let self else { return done() }
+        self.panel.refresh(completion: done)
+    }
+    private lazy var briefGate = Gate(minGap: Self.briefPoll) { [weak self] done in self?.runBrief(done) ?? done() }
+    private lazy var statusGate = Gate(minGap: Self.statusPoll) { [weak self] done in self?.runStatus(done) ?? done() }
+    private let liveQueue = DispatchQueue(label: "dev.kadans.live", qos: .utility)
+    /// Seconds one brief run takes (moving average); sets the closed-popover brief gap.
+    private var briefCost: TimeInterval = 0.2
+    private var briefFailLogged = false
+    private var lastBrief: Brief?
+    /// k25: the spare-quota check (`gas tick --json`) every 5 min and after each window reset, popover open or closed.
+    private let autoGas = AutoGas()
+
+    /// Dev and measuring only: KADANS_NO_USAGE_FETCH=1 never runs `usage fetch`; KADANS_FAKE_WORKING=<n> stands in for the
+    /// brief's working count (until `agents --brief --json` exists).
+    private let env = ProcessInfo.processInfo.environment
+    private var noUsageFetch: Bool { env["KADANS_NO_USAGE_FETCH"] == "1" }
+    private var fakeWorking: Int? { env["KADANS_FAKE_WORKING"].flatMap { Int($0) } }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -35,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             button.target = self
             button.action = #selector(togglePopover(_:))
         }
+        blinker.start()
 
         popover.behavior = .transient
         popover.animates = true
@@ -43,13 +82,150 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         panel.softenFirstFrame()
 
-        panel.onSize = { [weak self] h in self?.popover.contentSize = NSSize(width: PanelController.width, height: h) }
+        panel.onSize = { [weak self] h in self?.resizePopover(to: h) }
         panel.onClose = { [weak self] in self?.popover.performClose(nil) }
         panel.onStatus = { [weak self] status in self?.updateItem(status) }
+        panel.onAgents = { [weak self] agents in
+            guard let self, self.popover.isShown else { return }
+            self.blinker.setWorking(self.fakeWorking ?? Brief.working(inAgents: agents))
+        }
+        panel.onConfig = { [weak self] cfg in self?.autoGas.noteConfig(cfg) }
         panel.onLoaded = { [weak self] in self?.panel.refresh(full: true) }
         panel.load()
-        schedule(every: 30)
-        startUsagePolling()
+
+        let w = ChangeWatcher { [weak self] kinds in self?.changed(kinds) }
+        w.start()
+        watcher = w
+        startClosedPolls()
+        briefGate.request()
+        if noUsageFetch { log("usage fetch off (KADANS_NO_USAGE_FETCH=1)") } else { startUsagePolling() }
+        autoGas.onStarted = { [weak self] _ in
+            guard let self else { return }
+            if self.popover.isShown { self.panelGate.request() } else { self.briefGate.request(); self.statusGate.request() }
+        }
+        autoGas.start()
+    }
+
+    // MARK: push refresh (k19)
+
+    private func changed(_ kinds: Set<ChangeWatcher.Kind>) {
+        if popover.isShown {
+            panelGate.request()
+        } else {
+            if kinds.contains(.agents) { briefGate.request() }
+            if kinds.contains(.usage) { statusGate.request() }
+        }
+    }
+
+    private func startOpenPoll() {
+        stopPolls()
+        let t = Timer(timeInterval: Self.openPoll, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // A fallback only: skip it when a change notice refreshed the panel moments ago.
+            if Date().timeIntervalSince(self.panel.lastRefresh) >= Self.openPoll - 0.25 { self.panelGate.request() }
+        }
+        t.tolerance = 0.2
+        RunLoop.main.add(t, forMode: .common)
+        pollTimer = t
+    }
+
+    private func startClosedPolls() {
+        stopPolls()
+        let b = Timer(timeInterval: Self.briefPoll, repeats: true) { [weak self] _ in self?.briefGate.request() }
+        b.tolerance = 1
+        RunLoop.main.add(b, forMode: .common)
+        pollTimer = b
+        let s = Timer(timeInterval: Self.statusPoll, repeats: true) { [weak self] _ in self?.statusGate.request() }
+        s.tolerance = 3
+        RunLoop.main.add(s, forMode: .common)
+        statusTimer = s
+    }
+
+    private func stopPolls() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        statusTimer?.invalidate()
+        statusTimer = nil
+        briefGate.cancelPending()
+        statusGate.cancelPending()
+        panelGate.cancelPending()
+    }
+
+    /// `agents --brief --json` off the main thread. Its run time sets the gap to the next one, so the brief stays within
+    /// `briefCpuShare` of a core however slow the CLI is (a node start is ~0.05-0.1 s of CPU).
+    private func runBrief(_ done: @escaping () -> Void) {
+        liveQueue.async { [weak self] in
+            let started = Date()
+            let r = CLI.run(["agents", "--brief", "--json"], timeout: 10)
+            let took = Date().timeIntervalSince(started)
+            let brief = Brief(json: r.json)
+            DispatchQueue.main.async {
+                guard let self else { return done() }
+                self.briefCost = self.briefCost * 0.7 + took * 0.3
+                self.briefGate.minGap = min(Self.briefMaxGap, max(Self.briefMinGap, self.briefCost / Self.briefCpuShare))
+                if brief == nil && !self.briefFailLogged {
+                    self.briefFailLogged = true
+                    log("agents --brief --json: no brief yet (code \(r.code)); working motion stays off until it answers")
+                }
+                if brief != self.lastBrief, let b = brief { log("brief: working \(b.working), needs you \(b.needsYou)") }
+                self.lastBrief = brief
+                if !self.popover.isShown { self.blinker.setWorking(self.fakeWorking ?? brief?.working) }
+                done()
+            }
+        }
+    }
+
+    /// `status --json` alone (the menu bar title) while the popover is closed; the panel's full refresh does it when open.
+    private func runStatus(_ done: @escaping () -> Void) {
+        liveQueue.async { [weak self] in
+            let r = CLI.run(["status", "--json"])
+            let status = r.json as? [String: Any]
+            DispatchQueue.main.async {
+                guard let self else { return done() }
+                if !r.ok { log("status --json failed (code \(r.code), timeout \(r.timedOut)): \(r.err)") }
+                if !self.popover.isShown { self.updateItem(status) }
+                done()
+            }
+        }
+    }
+
+    // MARK: popover size (k19): animated in step with the page's slide, never snapped
+
+    static let resizeDuration: TimeInterval = 0.24
+    private var resizeTimer: Timer?
+    private var resizeTarget: CGFloat = 0
+
+    /// The page reports a taller height when a slide starts (grows with the slide) and a shorter one only after its slide
+    /// ended. Both are animated here frame by frame, from the size on screen now (a new report mid-way turns from where it
+    /// is), with the page's own ease-out curve. NSPopover's own contentSize animation is off while this runs.
+    private func resizePopover(to h: CGFloat) {
+        let w = PanelController.width
+        guard popover.isShown, !BlobBlinker.reduceMotion else {
+            finishResize()
+            popover.contentSize = NSSize(width: w, height: h)
+            return
+        }
+        let from = popover.contentSize.height
+        guard abs(from - h) >= 1 else { return }
+        resizeTimer?.invalidate()
+        resizeTarget = h
+        popover.animates = false
+        let start = CACurrentMediaTime()
+        let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let p = min(1, (CACurrentMediaTime() - start) / Self.resizeDuration)
+            let e = Ease.panelOut(p)
+            self.popover.contentSize = NSSize(width: w, height: (from + (h - from) * CGFloat(e)).rounded())
+            if p >= 1 { self.finishResize() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        resizeTimer = t
+    }
+
+    private func finishResize() {
+        resizeTimer?.invalidate()
+        resizeTimer = nil
+        popover.animates = true
     }
 
     // MARK: fresh usage (lib/usage-api.mjs; the CLI checks config usageApi, back-off and the 60 s minimum itself)
@@ -65,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Runs `kadans usage fetch --json` off the main thread. The first run may wait on a macOS Keychain dialog,
     /// hence the long timeout. Logs only the result code (the CLI never prints a token).
     private func fetchUsage() {
-        guard !usageBusy else { return }
+        guard !usageBusy, !noUsageFetch else { return }
         usageBusy = true
         usageQueue.async { [weak self] in
             let r = CLI.run(["usage", "fetch", "--json"], timeout: 90)
@@ -74,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 guard let self else { return }
                 self.usageBusy = false
                 if (obj?["ok"] as? Bool) == true {
-                    self.panel.refresh()
+                    if self.popover.isShown { self.panelGate.request() } else { self.statusGate.request() }
                 } else {
                     let code = obj?["code"] as? String ?? (r.timedOut ? "timeout" : "exit \(r.code)")
                     if !["off", "too_soon", "backoff"].contains(code) { log("usage fetch: \(code)") }
@@ -97,31 +273,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         blinker.blink(force: true)
         popover.contentViewController?.view.window?.makeKey()
         panel.refresh(full: true)
-        schedule(every: 5)
+        startOpenPoll()
         let newest = ownLastSample.map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantPast
         if Date().timeIntervalSince(newest) > Self.usageStaleOnOpen { fetchUsage() }
     }
 
     func popoverDidClose(_ notification: Notification) {
+        finishResize()
+        if resizeTarget > 0 { popover.contentSize = NSSize(width: PanelController.width, height: resizeTarget) }
         panel.resetFade()
-        schedule(every: 30)
-    }
-
-    private func schedule(every seconds: TimeInterval) {
-        timer?.invalidate()
-        let t = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in self?.panel.refresh() }
-        t.tolerance = seconds / 10
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        startClosedPolls()
     }
 
     // MARK: menu bar item (the menu bar item)
+
 
     private func updateItem(_ status: [String: Any]?) {
         guard let button = statusItem.button else { return }
         let item = MenuBarItem(status: status)
         let accounts = status?["accounts"] as? [[String: Any]] ?? []
         ownLastSample = (accounts.first { ($0["own"] as? Bool) == true }?["lastSample"] as? NSNumber)?.doubleValue
+        autoGas.noteStatus(status)
         blinker.setFace(item.face)  // a state change wins over a blink in progress
         button.attributedTitle = item.title
         button.setAccessibilityLabel(item.accessibilityLabel)
@@ -191,106 +363,3 @@ struct MenuBarItem {
     static let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize(for: .small) + 1, weight: .medium)
 }
 
-/// The 16 px blob as a template image (adapts to light/dark menu bars). Eyes are cut out.
-/// The closed-eyes frame keeps the body path untouched, so nothing around the eyes moves when it blinks.
-enum MenuBarBlob {
-    enum Face: CaseIterable {
-        case work, slow
-        var name: String { self == .work ? "work" : "slow" }
-    }
-
-    static let size = NSSize(width: 16, height: 16)
-
-    /// Draws the blob into the current context, 16 x 16 points, top-left origin (flipped).
-    static func draw(face: Face, eyesClosed: Bool = false) {
-        // Same shape as the panel's "square" blob (viewBox 32), scaled by 0.5.
-        let path = NSBezierPath(roundedRect: NSRect(x: 2.25, y: 2.5, width: 11.5, height: 11), xRadius: 3.75, yRadius: 3.75)
-        func eye(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) {
-            path.append(NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: min(w, h) / 2, yRadius: min(w, h) / 2))
-        }
-        switch (face, eyesClosed) {
-        case (.work, false):
-            eye(5.9, 5.6, 1.5, 3.4)
-            eye(8.6, 5.6, 1.5, 3.4)
-        case (.work, true):
-            // Eyes shut: two thin lines at the height the open eyes were centred on.
-            eye(5.5, 6.8, 2.1, 1.0)
-            eye(8.4, 6.8, 2.1, 1.0)
-        case (.slow, false):
-            eye(5.4, 7.0, 2.2, 1.3)
-            eye(8.4, 7.0, 2.2, 1.3)
-        case (.slow, true):
-            // The half-shut bars thin out and sink a little: lids all the way down.
-            eye(5.4, 7.7, 2.2, 0.7)
-            eye(8.4, 7.7, 2.2, 0.7)
-        }
-        path.windingRule = .evenOdd
-        NSColor.black.setFill()
-        path.fill()
-    }
-
-    static func image(face: Face, eyesClosed: Bool = false) -> NSImage {
-        let img = NSImage(size: size, flipped: true) { _ in
-            draw(face: face, eyesClosed: eyesClosed)
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-}
-
-/// Blinks the menu bar blob when the pointer enters it, and once when the popover opens.
-/// No timers run while idle: a blink is a few one-shot work items that end by themselves. Reduce motion turns it off.
-final class BlobBlinker: NSObject {
-    weak var button: NSStatusBarButton?
-    var isPopoverShown: () -> Bool = { false }
-
-    static let closedFor: TimeInterval = 0.11
-    static let secondBlinkGap: TimeInterval = 0.12
-    static let secondBlinkChance = 0.2
-    static let minGap: TimeInterval = 1.5
-
-    private var face: MenuBarBlob.Face = .work
-    private var lastBlink: Date = .distantPast
-    /// Bumped by every blink start and every face change; a pending step from an older blink does nothing.
-    private var generation = 0
-
-    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
-
-    /// The menu bar state changed: show the new face, open-eyed, and drop whatever blink was running.
-    func setFace(_ f: MenuBarBlob.Face) {
-        face = f
-        generation += 1
-        button?.image = MenuBarBlob.image(face: f)
-    }
-
-    @objc func mouseEntered(with event: NSEvent) {
-        guard !isPopoverShown() else { return }
-        blink(force: false)
-    }
-
-    /// force: the popover-open blink, which skips the popover and rate checks (never reduce motion).
-    func blink(force: Bool, doubleBlink: Bool? = nil) {
-        guard !Self.reduceMotion, let button else { return }
-        let now = Date()
-        if !force && now.timeIntervalSince(lastBlink) < Self.minGap { return }
-        lastBlink = now
-        generation += 1
-        let gen = generation
-        let again = doubleBlink ?? (Double.random(in: 0..<1) < Self.secondBlinkChance)
-        step(gen, closed: true, remainingBlinks: again ? 2 : 1, button)
-    }
-
-    private func step(_ gen: Int, closed: Bool, remainingBlinks: Int, _ button: NSStatusBarButton) {
-        guard gen == generation else { return }
-        button.image = MenuBarBlob.image(face: face, eyesClosed: closed)
-        let delay = closed ? Self.closedFor : Self.secondBlinkGap
-        let nextClosed = !closed
-        let left = closed ? remainingBlinks - 1 : remainingBlinks
-        if !closed && left == 0 { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak button] in
-            guard let self, let button else { return }
-            self.step(gen, closed: nextClosed, remainingBlinks: left, button)
-        }
-    }
-}

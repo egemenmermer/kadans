@@ -1,7 +1,7 @@
 import AppKit
 
 // Kadans menu bar app. `Kadans --snapshot <out.png> [--fixture <name>] [--theme light|dark]` renders the panel to a PNG and quits.
-// `Kadans --menubar-frames <dir>` writes the menu bar blob frames (every face, eyes open and closed) as PNGs and quits.
+// `Kadans --menubar-frames <dir>` writes the menu bar blob frames (every face: open, closed, glancing) as PNGs and quits.
 
 let args = CommandLine.arguments
 func value(after flag: String) -> String? {

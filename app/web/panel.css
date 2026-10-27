@@ -124,8 +124,12 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .list.scroll.end { -webkit-mask-image: none; mask-image: none; }
 .row { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--r-row); min-height: 44px; }
 .row { transition: background-color .12s ease-out; }
+/* k18: a row's hover, a changed meta line or a moving blob stays inside the row: no layout or paint work outside it.
+   Not on the idle group row, whose toggle button fills it (its focus ring would be clipped). */
+.row:not(.grp) { contain: layout paint; }
 .row:hover, .row.hov, .row:focus-within { background: var(--hover); }
 .av { width: 30px; height: 30px; flex: none; }
+.bw { display: flex; flex: none; transform-origin: 50% 90%; }
 .tx { min-width: 0; flex: 1; }
 .nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pv { font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
@@ -272,15 +276,28 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
 .panel.in > * { animation: k-push .24s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
 .panel.back > * { animation: k-back .22s var(--ease-out) backwards; animation-delay: var(--d, 0ms); }
 .panel.out > * { opacity: 0; transform: translateX(16px); transition: opacity .13s ease-in, transform .13s ease-in; }
-/* Blobs: a small squish when a row is reached, and a ~120 ms blink (eyes shut) then and now. Never a loop. */
+/* Blobs: a small squish when a row is reached, and a ~120 ms blink (eyes shut) then and now. */
 .av { transform-origin: 50% 90%; }
 .av .fc { transform-box: fill-box; transform-origin: center; }
 /* The squish and the arrival blink run as Web Animations from panel.js (poke); the timer blink is this class. */
-.av.blink:is(.f-work, .f-wait, .f-idle) .fc { animation: k-blink .18s ease-in-out; }
+.bw.blink .fc { animation: k-blink .18s ease-in-out; }
+/* k18: working blobs breathe (rise 1.5 px with a slight stretch, 2.4 s, sine ease); a blob that needs you hops once
+   every 4.4 s and rests in between. Transform on the wrapper only (composited, no JS per frame); identity at both ends,
+   and a positive, per-row delay (--ph from the id) so a first paint is still and rows never move in step. The loops run
+   only under #kadans.alive: panel.js removes it while the popover is closed, on Settings and with reduced motion. */
+#kadans.alive .bw-work { animation: k-breathe 2.4s cubic-bezier(.37,0,.63,1) calc(.3s + var(--ph, 0) * 2.4s) infinite; }
+#kadans.alive .bw-need { animation: k-hop 4.4s linear calc(.4s + var(--ph, 0) * 4.4s) infinite; }
 @keyframes k-rise { from { opacity: 0; transform: translateY(4px); } }
 @keyframes k-pop { from { opacity: 0; transform: scale(.97) translateY(-3px); } }
 @keyframes k-push { from { opacity: 0; transform: translateX(18px); } }
 @keyframes k-back { from { opacity: 0; transform: translateX(-12px); } }
 @keyframes k-blink { 30%, 65% { transform: scaleY(.1); } }
+@keyframes k-breathe { 50% { transform: translateY(-1.5px) scale(.985, 1.035); } }
+@keyframes k-hop {
+  0% { transform: none; animation-timing-function: cubic-bezier(.2,.7,.3,1); }
+  6% { transform: translateY(-3px) scale(.97, 1.04); animation-timing-function: cubic-bezier(.5,0,.8,.5); }
+  11% { transform: scale(1.04, .95); animation-timing-function: cubic-bezier(.2,.7,.3,1); }
+  16%, 100% { transform: none; }
+}
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
