@@ -22,6 +22,8 @@ import { configView, setSetting } from '../lib/config.mjs';
 import { isRemoteId, refreshRemote, remoteCaller, remoteCompact, remoteSend, remoteStop, triggerRemote } from '../lib/remote.mjs';
 import { SEND_MAX, messageText } from '../lib/text.mjs';
 import { ERR as COMPUTER_ERR, addComputer, listComputers, readStdin, removeComputer } from '../lib/computers.mjs';
+import { ERR as INBOX_ERR, inboxCaller, listRepos, readInbox, readInboxState, replyTo, sendFollowUp, setupInbox, startTask as startInboxTask } from '../lib/inbox.mjs';
+import { HUB_ERR, HUB_LINE, openHub, startHub } from '../lib/hub.mjs';
 import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, readCache, renderAgents, runEvent, sendAgent, stopAgent } from '../lib/agents.mjs';
 import { refresh as refreshTitles, triggerRefresh } from '../lib/smart-titles.mjs';
 import { setTitle } from '../lib/titles.mjs';
@@ -113,6 +115,14 @@ Usage:
   kadans computers add --name <name>   pair one: the code that \`kadans connect\` printed on the other computer
                       comes on stdin only (pbpaste | kadans computers add --name PC); never echoed or stored
   kadans computers remove <id>   unpair one
+  kadans inbox [--json]   one inbox for this Mac and paired computers: questions, escalations, done reports, tasks
+  kadans inbox setup   turns the inbox on: opens the "Kadans inbox" tab in Orca (closing that tab turns it off)
+  kadans inbox hub   what runs inside that tab (Kadans starts it; not for typing)
+  kadans inbox tasks [--json]   only the tasks of the Kadans Run
+  kadans task new --on <local|computer id> --repo <repo id> [--model <id>] [--effort <level>] < text   start a Claude worker; prints the dispatch id
+  kadans task reply <message id> < answer   answer an open question or escalation
+  kadans task send <dispatch id> < message   a follow-up to a task's worker
+  kadans repos --on <local|computer id> [--json]   that computer's git repos in Orca (id, name)
   kadans install [--apply] [--json]   preview (or write, with backup) settings.json changes
   kadans uninstall [--apply] [--all]   preview (or write, with backup) removing them; --all also removes setup's
                       copy (~/.kadans/app) and ~/Applications/Kadans.app, and asks before deleting your data
@@ -1042,6 +1052,116 @@ async function computersCmd(args, env) {
   return 0;
 }
 
+// ---------- k51: the inbox (lib/inbox.mjs) ----------
+// Agent text is printed, never stored or logged; task text and replies come on stdin only (an argument is refused unread).
+// Errors are the fixed sentences in lib/inbox.mjs. `kadans task list` stays the local queue; the Run's tasks are in
+// `kadans inbox` (kind task) and `kadans inbox tasks`.
+const INBOX_KIND = { question: 'question', escalation: 'escalation', done: 'done', message: 'message', task: 'task' };
+function inboxLine(i) {
+  const where = i.machineName ? ` · ${i.machineName}` : '';
+  const reply = i.canReply ? ' · reply: kadans task reply ' + i.id : '';
+  const preview = i.preview ? `\n    ${i.preview}` : '';
+  return `${i.id}  ${INBOX_KIND[i.kind] ?? 'message'} · ${i.status}${where} · ${i.title}${reply}${preview}\n`;
+}
+
+async function inboxCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  const home = kadansHome(env);
+  const call = inboxCaller(env);
+  if (pos[0] === 'setup') {
+    // k53: the "Set up" tap. Opens the hub's own Orca tab when no hub answers; never twice.
+    if (pos.length !== 1 || Object.keys(flags).length) return fail('usage: kadans inbox setup');
+    const r = await openHub(home, { call, bin: stableBin(fileURLToPath(import.meta.url), home) });
+    if (!r.ok) return fail(r.why);
+    process.stdout.write(r.created ? 'inbox on: the "Kadans inbox" tab in Orca keeps it on (closing that tab turns it off)\n'
+      : 'inbox on: the "Kadans inbox" tab in Orca already keeps it on\n');
+    return 0;
+  }
+  if (pos[0] === 'hub') return inboxHubCmd(pos, flags, env, home, call);
+  if (pos.length > 1 || (pos[0] && pos[0] !== 'tasks')) return fail('usage: kadans inbox [--json] | inbox tasks [--json] | inbox setup');
+  const r = await readInbox(home, { call });
+  if (!r.ok) return fail(r.why);
+  const items = pos[0] === 'tasks' ? r.items.filter((i) => i.kind === 'task') : r.items;
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(pos[0] === 'tasks' ? items : { ready: r.ready, hub: r.hub, machines: r.machines, items })}\n`);
+    return 0;
+  }
+  if (!r.ready) process.stdout.write(`${INBOX_ERR.off}\n`);
+  else if (!items.length) process.stdout.write(pos[0] === 'tasks' ? 'no tasks yet\n' : 'the inbox is empty\n');
+  for (const i of items) process.stdout.write(inboxLine(i));
+  return 0;
+}
+
+// k53: `kadans inbox hub`, the process inside the "Kadans inbox" Orca tab (started by `inbox setup` with exec). Binds the
+// Kadans Run to this tab's pane, prints one line, answers pings on $KADANS_HOME/hub.sock until the tab closes (SIGHUP),
+// Ctrl-C (SIGINT) or SIGTERM, then removes its socket. Its stdin is read and dropped: anything typed into the pane goes
+// nowhere. Refused outside an Orca terminal and inside an agent chat (k51's rule for the coordinator pane).
+async function inboxHubCmd(pos, flags, env, home, call) {
+  if (pos.length !== 1 || Object.keys(flags).length) return fail('usage: kadans inbox hub (Kadans starts it in its own Orca tab)');
+  const handle = env.ORCA_TERMINAL_HANDLE;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(handle ?? '') || env.CLAUDECODE || env.ORCA_AGENT_SESSION_ID) return fail(HUB_ERR.where);
+  const isBound = () => {
+    const s = readInboxState(home);
+    return Boolean(s.runId) && s.coordinator === handle;
+  };
+  const hub = await startHub(home, { bind: () => setupInbox(home, { call, handle }), isBound });
+  if (!hub.ok) return fail(hub.why);
+  process.stdout.write(hub.bound ? `${HUB_LINE}\n` : `Kadans inbox: ${hub.why}\n`);
+  if (process.stdin && !process.stdin.destroyed) {
+    process.stdin.on('error', () => {});
+    process.stdin.on('data', () => {}); // dropped, never read into anything
+    process.stdin.resume();
+  }
+  return new Promise((done) => {
+    const quit = () => hub.stop().then(() => {
+      process.stdin.pause?.();
+      done(0);
+      setTimeout(() => process.exit(0), 50).unref();
+    });
+    for (const sig of ['SIGINT', 'SIGHUP', 'SIGTERM']) process.once(sig, quit);
+  });
+}
+
+// `kadans task new|reply|send`: the owner's text on stdin only, checked by messageText; nothing of it is printed or stored.
+async function inboxTaskCmd(sub, args, env) {
+  const { pos, flags } = parseArgs(args);
+  const home = kadansHome(env);
+  const call = inboxCaller(env);
+  const known = { new: ['on', 'repo', 'model', 'effort', 'json'], reply: ['json'], send: ['json'] }[sub];
+  const usage = {
+    new: 'usage: kadans task new --on <local|computer id> --repo <repo id> [--model <id>] [--effort <level>] (the task text comes on stdin)',
+    reply: 'usage: kadans task reply <message id> (the answer comes on stdin)',
+    send: 'usage: kadans task send <dispatch id> (the message comes on stdin)',
+  }[sub];
+  if (Object.keys(flags).some((f) => !known.includes(f)) || pos.length !== (sub === 'new' ? 0 : 1)) return fail(usage);
+  if (sub === 'new' && (typeof flags.on !== 'string' || typeof flags.repo !== 'string')) return fail(usage);
+  const raw = readStdin(0, process.stdin.isTTY, 4 * SEND_MAX + 64);
+  if (raw === null) return fail(INBOX_ERR.text);
+  let r;
+  if (sub === 'new') {
+    r = await startInboxTask(home, { machine: flags.on, repo: flags.repo, text: raw, model: flags.model ?? null, effort: flags.effort ?? null, confirmed: true }, { call });
+    if (!r.ok) return fail(r.why);
+    process.stdout.write(flags.json ? `${JSON.stringify({ dispatchId: r.dispatchId, taskId: r.taskId, machine: r.machine })}\n` : `${r.dispatchId}\n`);
+    return 0;
+  }
+  r = sub === 'reply' ? await replyTo(home, pos[0], raw, { call }) : await sendFollowUp(home, pos[0], raw, { call });
+  if (!r.ok) return fail(r.why);
+  process.stdout.write(sub === 'reply' ? `${r.id}: replied\n` : `${r.dispatchId}: sent\n`);
+  return 0;
+}
+
+// `kadans repos --on <local|computer id> [--json]`: that machine's git repos (id and name; never a path).
+async function reposCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos.length || typeof flags.on !== 'string' || Object.keys(flags).some((f) => f !== 'on' && f !== 'json')) return fail('usage: kadans repos --on <local|computer id> [--json]');
+  const r = await listRepos(flags.on, { call: inboxCaller(env) });
+  if (!r.ok) return fail(r.why);
+  if (flags.json) process.stdout.write(`${JSON.stringify({ machine: r.machine, list: r.list })}\n`);
+  else if (!r.list.length) process.stdout.write('no git repos in Orca on that computer\n');
+  else for (const x of r.list) process.stdout.write(`${x.id}  ${x.name}\n`);
+  return 0;
+}
+
 function main(argv, env = process.env) {
   const cmd = argv[0];
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') {
@@ -1060,6 +1180,7 @@ function main(argv, env = process.env) {
   if (cmd === 'codex') return codexCmd(argv.slice(1), env);
   try {
     if (cmd === 'project' || cmd === 'proje') return projectCmd(argv[1], argv.slice(2), env);
+    if ((cmd === 'task' || cmd === 'gorev' || cmd === 'görev') && ['new', 'reply', 'send'].includes(argv[1])) return inboxTaskCmd(argv[1], argv.slice(2), env).catch(() => fail(INBOX_ERR.read));
     if (cmd === 'task' || cmd === 'gorev' || cmd === 'görev') return taskCmd(argv[1], argv.slice(2), env);
     if (cmd === 'ekle') return taskCmd('add', argv.slice(1), env);
     if (cmd === 'liste') return taskCmd('list', argv.slice(1), env);
@@ -1078,6 +1199,8 @@ function main(argv, env = process.env) {
     if (cmd === 'devices') return devicesCmd(argv.slice(1), env);
     if (cmd === 'connect') return runConnect(argv.slice(1), { env });
     if (cmd === 'computers') return computersCmd(argv.slice(1), env).catch(() => fail(COMPUTER_ERR.list));
+    if (cmd === 'inbox') return inboxCmd(argv.slice(1), env).catch(() => fail(INBOX_ERR.read));
+    if (cmd === 'repos') return reposCmd(argv.slice(1), env).catch(() => fail(INBOX_ERR.repos));
     // k48, internal: the detached refresher lib/remote.mjs triggerRemote starts. Prints nothing.
     if (cmd === 'remote' && argv[1] === 'refresh' && argv.length === 2) return refreshRemote(kadansHome(env), { call: remoteCaller(env) }).then(() => 0, () => 1);
   } catch (e) {

@@ -620,3 +620,63 @@ test('k48 cliRunner: input goes to the child on stdin; without input stdin is cl
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('k51 phone: inbox, inbox-reply, task-new, repos are allowed for paired devices; task-new needs confirmed; sends share the k48 limit', async () => {
+  for (const a of ['inbox', 'inbox-reply', 'task-new', 'repos']) assert.ok(ALLOWED_ACTIONS.includes(a), a);
+  const box = { ready: true, machines: [{ id: 'local', name: 'This Mac' }], items: [{ id: 'msg_q1', kind: 'question', preview: 'AGENT-TEXT-K51' }] };
+  const s = await boot({ outputs: {
+    'inbox --json': ok(box),
+    'repos --on local --json': ok({ machine: 'local', list: [{ id: 'repo-mac', name: 'kadans' }] }),
+    'task new --on env-kasa --repo id:repo-pc --model opus --effort high': { code: 0, out: 'disp_new\n', err: '', timedOut: false },
+    'task reply msg_bad': { code: 2, out: 'AGENT-TEXT-K51 on stdout\n', err: 'kadans: refused: no open question or escalation with that id in the Kadans inbox\n', timedOut: false },
+  } });
+  try {
+    // not paired: nothing runs
+    assert.equal((await s.req('POST', '/api/action', { body: { action: 'inbox' } })).status, 401);
+    const { token } = await s.pair();
+    const post = async (body) => {
+      s.clock.t += 1000;
+      return s.req('POST', '/api/action', { body, token });
+    };
+    let r = await post({ action: 'inbox' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { action: 'inbox', id: '', ok: true, why: '', inbox: box });
+    r = await post({ action: 'repos', machine: 'local' });
+    assert.deepEqual(r.json.repos, { machine: 'local', list: [{ id: 'repo-mac', name: 'kadans' }] });
+    assert.equal((await post({ action: 'repos', machine: '--json' })).status, 400);
+    // task-new: refused without the confirm step or with bad fields, before anything runs
+    const n = actionCalls(s.calls).length;
+    const good = { action: 'task-new', machine: 'env-kasa', repo: 'id:repo-pc', text: 'TASK-K51 ship it', model: 'opus', effort: 'high' };
+    for (const body of [good, { ...good, confirmed: 'true' }, { ...good, confirmed: true, machine: '-x' }, { ...good, confirmed: true, repo: '/Users/me/x' },
+      { ...good, confirmed: true, text: '/clear' }, { ...good, confirmed: true, model: undefined }, { ...good, confirmed: true, effort: 'turbo' }]) {
+      r = await post(body);
+      assert.equal(r.status, 400, JSON.stringify(body).slice(0, 90));
+      assert.match(r.json.why, /^refused: /);
+      assert.ok(!r.text.includes('TASK-K51'));
+    }
+    assert.equal(actionCalls(s.calls).length, n, 'refusals ran nothing');
+    r = await post({ ...good, confirmed: true });
+    assert.deepEqual(r.json, { action: 'task-new', id: 'env-kasa', ok: true, why: '', dispatchId: 'disp_new' });
+    const call = actionCalls(s.calls).at(-1);
+    assert.deepEqual(call, { args: ['task', 'new', '--on', 'env-kasa', '--repo', 'id:repo-pc', '--model', 'opus', '--effort', 'high'], timeout: 170_000, input: 'TASK-K51 ship it' });
+    // a failed reply: the why line comes from stderr only, never the agent text on stdout
+    r = await post({ action: 'inbox-reply', id: 'msg_bad', text: 'REPLY-K51 yes' });
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.why, /^refused: no open question/);
+    assert.ok(!r.text.includes('AGENT-TEXT-K51') && !r.text.includes('REPLY-K51'));
+    // the k48 limit: task-new + 1 reply sent so far; 4 more sends pass, the 7th waits (agent-send counts too)
+    for (let i = 0; i < 3; i++) assert.equal((await post({ action: 'inbox-reply', id: 'msg_q1', text: 'ok' })).status, 200);
+    assert.equal((await post({ action: 'agent-send', id: 'a1', text: 'ok' })).status, 200);
+    const busy = await post({ action: 'task-new', ...good, confirmed: true });
+    assert.deepEqual([busy.status, busy.json.why], [429, 'Too many messages; wait a minute']);
+    assert.equal((await post({ action: 'inbox' })).status, 200, 'reads are not sends');
+    s.server.flushSeen();
+    for (const f of readdirSync(s.home)) {
+      const text = readFileSync(join(s.home, f), 'utf8');
+      for (const x of ['TASK-K51', 'REPLY-K51', 'AGENT-TEXT-K51']) assert.ok(!text.includes(x), `${x} in ${f}`);
+    }
+  } finally {
+    await s.close();
+    rmSync(s.home, { recursive: true, force: true });
+  }
+});

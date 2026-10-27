@@ -458,6 +458,48 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         return t
     }
 
+    /// k51: an inbox id (message, dispatch, computer id or "local"): letters, digits, "_", ".", "-"; never a flag.
+    static func inboxId(_ v: Any?) -> String? {
+        guard let s = v as? String, s.count <= 128, s.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]*$", options: .regularExpression) != nil else { return nil }
+        return s
+    }
+    /// k51: a repo id, optionally as the exact selector "id:<repo id>".
+    static func repoArg(_ v: Any?) -> String? {
+        guard let s = v as? String, s.count <= 131, s.range(of: "^(id:)?[A-Za-z0-9][A-Za-z0-9_.-]*$", options: .regularExpression) != nil else { return nil }
+        return s
+    }
+    /// k51: a provider model id, as lib/inbox.mjs checks it.
+    static func modelArg(_ v: Any?) -> String? {
+        guard let s = v as? String, s.count <= 64, s.range(of: "^[A-Za-z0-9][A-Za-z0-9._\\[\\]-]*$", options: .regularExpression) != nil else { return nil }
+        return s
+    }
+
+    /// k51: a refused inbox action answers the page with a fixed line (never the text), so it never waits on.
+    private func failInbox(_ action: String) {
+        if let js = BridgeResult.script(["action": action, "id": "", "ok": false, "why": "refused: that was not accepted"]) { evaluate(js) }
+    }
+
+    /// k51: runs one inbox command off the main thread. Logs the exit code only. With key, a successful run's JSON is
+    /// pushed to the page under that key (`render({inbox: ...})`, `render({repos: ...})`); the why line comes from
+    /// stderr only, so agent text on stdout can never become an error line.
+    private func inboxRun(_ action: String, id: String, args: [String], stdin: String? = nil, timeout: TimeInterval, key: String? = nil) {
+        log("inbox action: \(action)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = CLI.run(args, stdin: stdin.map { Data($0.utf8) }, timeout: timeout)
+            log("inbox action \(action): code \(r.code)\(r.timedOut ? " (timed out)" : "")")
+            let parsed: Any? = (r.code == 0 && !r.timedOut) ? try? JSONSerialization.jsonObject(with: r.out) : nil
+            let firstLine = String(decoding: r.out, as: UTF8.self).split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            DispatchQueue.main.async {
+                if let key, let parsed { self.push([key: parsed]) }
+                var p = BridgeResult.payload(action: action, id: id, code: r.code, out: "", err: r.err, timedOut: r.timedOut)
+                if key != nil && parsed == nil && r.code == 0 { p["ok"] = false; p["why"] = "Kadans gave an answer the panel cannot read" }
+                if action == "task-new", r.code == 0, Self.inboxId(firstLine) != nil { p["dispatchId"] = firstLine }
+                if let js = BridgeResult.script(p) { self.evaluate(js) }
+                if action == "inbox-reply" || action == "task-new" || action == "inbox-setup" { self.inboxRun("inbox", id: "", args: ["inbox", "--json"], timeout: 20, key: "inbox") }
+            }
+        }
+    }
+
     /// k48: like runThenRefresh, but the message goes to the CLI on stdin and nothing of it (nor the CLI's output) is logged.
     private func sendThenRefresh(id: String, text: String) {
         log("agent send")
@@ -551,6 +593,43 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 return
             }
             sendThenRefresh(id: id, text: text)
+        // k51: the inbox (lib/inbox.mjs). Each action is one owner tap. The text goes to the CLI on stdin only; nothing of it,
+        // of the agents' messages or of the CLI's output is logged (exit codes only). task-new runs only with confirmed: true,
+        // which the page sets after its confirm step.
+        case "inbox":
+            inboxRun("inbox", id: "", args: ["inbox", "--json"], timeout: 20, key: "inbox")
+        // k53: "Set up": `kadans inbox setup` opens the "Kadans inbox" Orca tab when no hub answers (never twice) and waits
+        // until it answers. Fixed arguments: nothing from the page goes in. Then the inbox is read again (ready, hub).
+        case "inbox-setup":
+            inboxRun("inbox-setup", id: "", args: ["inbox", "setup"], timeout: 45)
+        case "repos":
+            guard let machine = Self.inboxId(body["machine"]) else { log("ignored repos: not a machine id"); return failInbox("repos") }
+            inboxRun("repos", id: machine, args: ["repos", "--on", machine, "--json"], timeout: 20, key: "repos")
+        case "inbox-reply":
+            guard let id = Self.inboxId(body["id"]), let text = Self.messageText(body["text"]) else {
+                log("ignored inbox-reply: not a message id or the text is not 1 to 4000 printable characters")
+                return failInbox("inbox-reply")
+            }
+            inboxRun("inbox-reply", id: id, args: ["task", "reply", id], stdin: text, timeout: 45)
+        case "task-new":
+            guard body["confirmed"] as? Bool == true else { log("ignored task-new: not confirmed"); return failInbox("task-new") }
+            guard let machine = Self.inboxId(body["machine"]), let repo = Self.repoArg(body["repo"]),
+                  let text = Self.messageText(body["text"]) else {
+                log("ignored task-new: machine, repo or text not accepted")
+                return failInbox("task-new")
+            }
+            var args = ["task", "new", "--on", machine, "--repo", repo]
+            if let m = body["model"], !(m is NSNull) {
+                guard let model = Self.modelArg(m) else { log("ignored task-new: model not accepted"); return failInbox("task-new") }
+                args += ["--model", model]
+            }
+            if let e = body["effort"], !(e is NSNull) {
+                guard args.contains("--model"), let effort = e as? String, ["low", "medium", "high", "xhigh", "max"].contains(effort) else {
+                    log("ignored task-new: effort not accepted"); return failInbox("task-new")
+                }
+                args += ["--effort", effort]
+            }
+            inboxRun("task-new", id: machine, args: args, stdin: text, timeout: 170)
         case "approve":
             guard let task = Self.taskId(body["id"]) else { log("ignored approve: id is not a task number"); return }
             runThenRefresh(["approve", String(task)])

@@ -482,3 +482,54 @@ html[data-shell="phone"] .tbar .pill { min-height: 38px; padding: 8px 16px; font
 /* The inline card rises in like a new row (.enter); the sheet slides up (.up, added only when motion is on). */
 .tell.sheet.up { animation: sheet-in .3s cubic-bezier(.32,.72,0,1) backwards; }
 @keyframes sheet-in { from { transform: translateY(100%); } }
+
+/* k52: Inbox. One tray in the bottom bar (a count only when something needs you), then a pushed screen like Settings. */
+.ic.ibx { position: relative; }
+.ic.ibx .badge { position: absolute; top: -4px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: var(--r-full); background: var(--orange); color: var(--ink); font-size: 10px; font-weight: 600; line-height: 16px;
+  text-align: center; font-variant-numeric: tabular-nums; box-shadow: 0 0 0 2px var(--panel); pointer-events: none; }
+.top .nt-go { margin-left: auto; }
+.ibl { font-size: 12px; color: var(--label2); margin: 2px 6px 8px; }
+.ibl.warn, .inbox .d.warn, .inbox .s.warn, .tmsg.warn { color: var(--orange-text); }
+.card.ibs { margin-bottom: 4px; }
+.it.ib { align-items: flex-start; }
+.it.ib > .av { flex: none; margin-top: 1px; }
+.it.ib .tx > span { display: block; }
+.it.ib .nm { font-weight: 500; }
+.it.ib .q { font-size: 12.5px; line-height: 17px; color: var(--label); margin-top: 3px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+.it.ib span.q { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; }
+.it.ib > .pill { margin-top: 1px; }
+button.it.ib { width: 100%; text-align: left; border-radius: 0; transition: opacity .12s ease-out; }
+button.it.ib:active { opacity: .6; }
+button.it.ib:focus-visible { border-radius: 8px; }
+.it.ib .chev, .it.nav .chev { align-self: center; }
+.chev.on svg { transform: rotate(90deg); }
+.sgrp .tell { margin: 0 0 10px 32px; }
+/* New task: computer, project, text, Options, then the confirm card. */
+.seg.mach { flex-wrap: wrap; border-radius: 14px; }
+.seg.mach button[aria-disabled="true"] { opacity: .6; }
+.seg.mach .off { color: inherit; font-weight: 400; }
+.it.ntl { min-height: 0; padding-bottom: 4px; }
+.it.ntl .tx > div { font-size: 12px; color: var(--label2); }
+.fld.ntq { margin: 4px 0 6px; }
+.it.pk { width: 100%; text-align: left; min-height: 36px; padding: 7px 0; }
+.it.pk .tx { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.it.pk .ck { flex: none; display: flex; color: var(--blue2); visibility: hidden; }
+.it.pk .ck svg { width: 14px; height: 14px; }
+.it.pk[aria-pressed="true"] .tx { font-weight: 500; }
+.it.pk[aria-pressed="true"] .ck { visibility: visible; }
+.sgrp .d.sub { padding: 0 0 9px; }
+.ntx { margin: 10px 0; min-height: 66px; max-height: 160px; }
+.sgrp .ntx + .d { margin: -4px 2px 9px; }
+.sgrp .ntx + .d:empty { display: none; }
+.ntb { margin: 12px 4px 4px; }
+.ntb .pill[aria-disabled="true"], .ncf .pill[aria-disabled="true"] { opacity: .45; box-shadow: none; cursor: default; }
+.card.ncf { margin-top: 12px; }
+.ncf .t { font-weight: 500; overflow-wrap: anywhere; }
+.ncf .s { font-size: 12px; color: var(--label2); margin-top: 3px; }
+.ncf .btns { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.confirming .sgrp { opacity: .5; pointer-events: none; transition: opacity .15s ease-out; }
+html[data-shell="phone"] .it.ib .q { font-size: 15px; line-height: 21px; }
+html[data-shell="phone"] .it.pk { min-height: 46px; }
+html[data-shell="phone"] .ntb .pill, html[data-shell="phone"] .ncf .pill { min-height: 38px; padding: 8px 16px; font-size: 14px; }

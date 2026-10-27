@@ -141,6 +141,8 @@
     theme: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>',
     pen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 3.2l2.2 2.2-7.3 7.3-2.9.7.7-2.9z"/></svg>',
     gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
+    // k52: the inbox tray
+    inbox: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 9.2 4.1 3.9c.15-.5.6-.9 1.15-.9h5.5c.55 0 1 .4 1.15.9l1.6 5.3v2.6c0 .7-.5 1.2-1.2 1.2H3.7c-.7 0-1.2-.5-1.2-1.2z"/><path d="M2.6 9.2h2.9l.9 1.5h3.2l.9-1.5h2.9"/></svg>',
   };
 
   // ---------- view state that survives re-renders (render runs every 5 s) ----------
@@ -174,7 +176,9 @@
     rename: null, titles: new Map(), order: null, liveIds: [], awayTitles: new Map(),
     // k49: tell = the open composer { id, title, short, machine, n (characters), why (hint key) }: never the text, which
     // lives only in the textarea; telling = a message sent and not answered yet { id, at }.
-    tell: null, telling: null };
+    tell: null, telling: null,
+    // k52: ibx = the inbox screen (see "inbox (k52)"); repos = the last repos answer { machine, list, err }.
+    ibx: null, repos: null };
 
   // ---------- motion (k9a, k14) ----------
   // Calm and short: 120-260 ms, transform and opacity only. Nothing moves on the first paint, in the 300 ms after it
@@ -647,6 +651,7 @@
   function actionResult(r) {
     if (r && typeof r === 'object' && (r.action === 'computers-add' || r.action === 'computers-remove')) return compResult(r); // k41
     if (r && typeof r === 'object' && r.action === 'agent-send' && r.id != null) return tellResult(r); // k49: fixed lines only
+    if (r && typeof r === 'object' && IBX_ACTIONS.has(r.action)) return inboxResult(r); // k52: by action (ids differ per bridge)
     // k32: a refused reorder drops the local order (the rows go back to the served order); a refused rename drops the
     // name shown early and says why on the row.
     if (r && typeof r === 'object' && r.ok !== true && r.action === 'reorder') {
@@ -889,7 +894,7 @@
       ? S('button', { class: 'sw', role: 'switch', 'aria-checked': on, 'aria-label': 'Auto-pace', 'data-do': 'autopace' })
       : S('button', { class: 'sw', role: 'switch', 'aria-checked': false, 'aria-disabled': true, 'aria-label': `Auto-pace (${SOON})`, title: SOON });
     return S('div', { class: 'bottom' }, [S('div', { class: 'toggle' }, [sw, '<span aria-hidden="true">Auto-pace</span>']),
-      '<div class="sp">' +
+      '<div class="sp">' + inboxButton() +
       `<button class="ic" title="Theme" aria-label="Theme" data-do="theme">${IC.theme}</button>` +
       `<button class="ic" title="Settings" aria-label="Settings" data-do="settings">${IC.gear}</button></div>`], 'bottom');
   }
@@ -1478,8 +1483,10 @@
   function render(data) {
     const d = data && typeof data === 'object' ? data : {};
     const next = { ...(view.data ?? {}) };
-    for (const k of ['status', 'agents', 'config', 'install', 'phone', 'computers', 'update']) if (k in d) next[k] = d[k];
+    for (const k of ['status', 'agents', 'config', 'install', 'phone', 'computers', 'update', 'inbox']) if (k in d) next[k] = d[k];
     view.data = next;
+    if ('inbox' in d) inboxArrived(); // k52
+    if ('repos' in d) reposArrived(d.repos);
     if ('phone' in d && view.phoneWant && (d.phone?.on === view.phoneWant.on || d.phone?.error)) view.phoneWant = null;
     if ('update' in d && view.updWant && d.update?.auto === view.updWant.on) view.updWant = null;
     if ('config' in d) settlePending(d.config);
@@ -1488,6 +1495,7 @@
       view.applyFailed = hooksNeeded(d.install) > 0;
       view.applied = !view.applyFailed;
     }
+    if ('agents' in d && view.shown) inboxRead(); // k52: a host refresh; reads only when one is due (the badge)
     if (view.screen !== 'main') return renderScreen();
     // k32: a row held or settling is never yanked: the data is kept and drawn when it lands.
     if (drag.phase === 'on' || drag.phase === 'settle') {
@@ -1818,7 +1826,8 @@
       view.deferred = true;
       return;
     }
-    const tree = view.screen === 'review' ? reviewTree() : settingsTree();
+    if (view.screen === 'inbox') inboxRead(); // k52: every 15 s while the Inbox shows (the host's refresh draws it)
+    const tree = view.screen === 'review' ? reviewTree() : view.screen === 'inbox' ? inboxTree() : settingsTree();
     const el = root();
     const focusKey = keyOf(document.activeElement);
     const before = patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs;
@@ -1852,7 +1861,8 @@
   function go(screen, dir = 'in') {
     if (view.screen === 'main' && view.tree) view.scroll = listNode()?.scrollTop ?? 0;
     // k27/k28: the app polls `devices --json` only while Settings is open; tell it when the page leaves for the main panel.
-    if (screen === 'main' && view.screen !== 'main' && net.mode === 'bridge') send({ action: 'settings-closed' });
+    if (screen === 'main' && settingsScreen() && net.mode === 'bridge') send({ action: 'settings-closed' });
+    if (screen !== 'inbox' && view.screen === 'inbox') inboxLeave(); // k52: an open reply or new task goes, text and all
     view.slide = motionOk() ? { dir, at: Date.now() } : null;
     if (screen === 'main') view.sub = null; // Review keeps it: Back from Review lands on Advanced again
     view.screen = screen;
@@ -2035,10 +2045,11 @@
   const canTell = (a) => (a.machine ? remoteCan(a, 'canSend') && (rowState(a) === 'idle' || rowState(a) === 'working')
     : TELL_STATES.has(rowState(a)) && orcaOk(a));
   const tellSheet = () => document.documentElement.dataset.shell === 'phone';
-  function tellField(it = view.tree) {
+  // The field's node in the last drawn tree (k52: the Inbox's reply composer lives in the screen tree).
+  function tellField(it = view.screen === 'main' ? view.tree : view.stree, flag = 'tellField') {
     if (!it) return null;
-    if (it.tellField) return it.node ?? null;
-    for (const k of it.kids ?? []) { const n = tellField(k); if (n) return n; }
+    if (it[flag]) return it.node ?? null;
+    for (const k of it.kids ?? []) { const n = tellField(k, flag); if (n) return n; }
     return null;
   }
   function shortTitle(t) {
@@ -2052,9 +2063,10 @@
     const hint = t.why && t.why !== 'empty' ? TELL_HINT[t.why] : '';
     const count = t.n >= TELL_NEAR ? `${t.n} / ${TELL_MAX}` : '';
     const off = !t.n || Boolean(t.why);
-    return S('div', { class: sheet ? 'tell sheet' : 'tell', role: 'group', 'aria-label': `Tell ${t.title}`, 'data-key': `tell:${t.id}` }, [
-      { key: 'tl', tellField: true, html: `<textarea class="tl" data-key="tl:${id}" rows="2" placeholder="${esc(`Tell ${t.short}…`)}" ` +
-        `aria-label="${esc(`Message to ${t.title}`)}" spellcheck="true" autocomplete="off" enterkeyhint="enter"></textarea>` },
+    const reply = t.kind === 'reply'; // k52: the same composer answers an inbox question
+    return S('div', { class: sheet ? 'tell sheet' : 'tell', role: 'group', 'aria-label': `${reply ? 'Reply to' : 'Tell'} ${t.title}`, 'data-key': `tell:${t.id}` }, [
+      { key: 'tl', tellField: true, html: `<textarea class="tl" data-key="tl:${id}" rows="2" placeholder="${esc(reply ? 'Your answer…' : `Tell ${t.short}…`)}" ` +
+        `aria-label="${esc(`${reply ? 'Answer to' : 'Message to'} ${t.title}`)}" spellcheck="true" autocomplete="off" enterkeyhint="enter"></textarea>` },
       // the title gives way (ellipsis), the machine always shows
       `<div class="tto"><span class="tn">To ${esc(t.title)}</span><span class="tm"> on ${esc(t.machine)}</span></div>`,
       `<div class="tbar"><span class="tmsg${hint ? ' warn' : ''}" aria-live="polite">${esc(hint)}</span>` +
@@ -2095,7 +2107,8 @@
     view.tell = null;
     tellViewport(false);
     render({});
-    if (focusRow) try { root().querySelector?.(`[data-do="tell"][data-id="${CSS.escape(String(t.id))}"]`)?.focus?.(); } catch { /* fine */ }
+    const by = t.kind === 'reply' ? 'reply' : 'tell';
+    if (focusRow) try { root().querySelector?.(`[data-do="${by}"][data-id="${CSS.escape(String(t.id))}"]`)?.focus?.(); } catch { /* fine */ }
   }
   function tellInput() {
     const t = view.tell;
@@ -2127,6 +2140,7 @@
       render({});
       return;
     }
+    if (t.kind === 'reply') return replySend(t, f, c.text); // k52
     const a = findAgent(t.id);
     f.value = '';
     endTell(false);
@@ -2162,6 +2176,627 @@
       vv.removeEventListener('scroll', tellVV);
       tellVV = null;
       css?.setProperty?.('--kb', '0px');
+    }
+  }
+
+  // ---------- inbox (k52) ----------
+  // One inbox for this Mac and the paired computers (k51: lib/inbox.mjs, the payload of `kadans inbox --json`). The
+  // bottom bar's Inbox pushes a screen: what needs the owner (open questions and escalations), what runs, what
+  // finished. A question opens the k49 composer (inline on the Mac, the bottom sheet on the phone) and sends one
+  // inbox-reply {id, text}. New task (a second screen): computer, project, text, Options (model, effort), then a confirm
+  // step that names everything; only its Start sends task-new, with confirmed: true. Agent text is the capped preview the
+  // payload gives, always escaped, and nothing in it acts: the page only reads the inbox and sends what the owner taps.
+  // Refusals show fixed lines (INBOX_LINES), never the CLI's text. The task text lives in its textarea; only its first
+  // 60 characters sit in view.ibx.nt.head while the confirm step shows them (cleared with the confirm).
+  // view.ibx: { sub ('new' | null), open (the expanded row), at / reading (the last read sent, the one in flight), err (the
+  // last read failed), replying { id, at }, setup (sent at), line { where, ok, text, html, at }, nt (the new task) }.
+  const IBX_ACTIONS = new Set(['inbox', 'repos', 'inbox-reply', 'task-new', 'inbox-setup']);
+  const INBOX_OPEN_MS = 15_000; // the Inbox screen reads again this often
+  const INBOX_MAIN_MS = 60_000; // elsewhere, while the panel shows: for the badge
+  const INBOX_FIRST_MS = 8000; // the first background read, this long after the page loads
+  const INBOX_REOPEN_MS = 20_000; // the popover opened: read at once unless the last read is this fresh
+  const INBOX_WAIT_MS = 30_000; // a read with no answer by then may go again
+  const REPLY_WAIT_MS = 60_000; // the bridges allow 45 s
+  const START_WAIT_MS = 180_000; // the bridges allow 170 s
+  const SETUP_WAIT_MS = 30_000;
+  const IBX_LINE_MS = 8000;
+  const DONE_MAX = 5;
+  const NT_HEAD = 60;
+  const REPO_SHOW = 6;
+  const PREVIEW_MAX = 280; // lib/inbox.mjs caps it already; the page never shows more
+  const IBX_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/; // as the bridges check ids
+  const MODEL_OK = /^[A-Za-z0-9][A-Za-z0-9._[\]-]{0,63}$/;
+  const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const MODELS = [['', 'Default'], ['opus', 'Opus'], ['sonnet', 'Sonnet']]; // Claude Code's model aliases
+  const OPEN_KINDS = new Set(['question', 'escalation']);
+  const KIND_LINE = { question: 'Question', escalation: 'Escalation', done: 'Done', message: 'Update', task: 'Task' };
+  const TASK_LINE = { pending: 'Waiting', ready: 'Ready', blocked: 'Blocked', dispatched: 'Starting', running: 'Running',
+    completed: 'Finished', failed: 'Failed', cancelled: 'Cancelled', canceled: 'Cancelled' };
+  const TASK_END = new Set(['completed', 'failed', 'cancelled', 'canceled']);
+  const DONE_LINE = { succeeded: 'Done', done: 'Done', failed: 'Failed' };
+  // The answer's reason -> one fixed line (the first match wins); anything else is the caller's fallback.
+  const INBOX_LINES = [
+    [/not set up/i, 'The inbox isn’t set up yet.'],
+    [/confirm step/i, 'Not started: it needs the confirm step.'],
+    [/production/i, 'Kadans never starts work on a production computer.'],
+    [/not this Mac or a paired|paired computers/i, 'That computer isn’t available now.'],
+    [/repo/i, 'That project isn’t on that computer.'],
+    [/did not confirm the start/i, 'Orca didn’t confirm the start. Check the inbox before starting it again.'],
+    [/no open question/i, 'That question was answered or is gone.'],
+    [/did not take/i, 'Orca didn’t take it. Nothing was sent.'],
+    [/Too many messages/i, 'Too many messages; wait a minute'],
+    [/Too many actions/i, 'Too many actions at once; try again'],
+    [/took too long|timed out|in time/i, 'No answer in time. Check the inbox before trying again.'],
+    [/reach your Mac/i, 'Couldn’t reach your Mac.'],
+    [/orca not found/i, 'Orca isn’t installed on your Mac.'],
+    [/text comes on stdin|printable/i, 'Kadans can’t send that text.'],
+    [/model|effort/i, 'That model or effort isn’t accepted.'],
+  ];
+  const fixedLine = (why, fallback) => (INBOX_LINES.find(([re]) => re.test(String(why ?? ''))) ?? [null, fallback])[1];
+  const SETUP_HTML = 'Couldn’t set it up from here. Run <span class="code">kadans inbox setup</span> once in an Orca terminal you keep open.';
+  const IC_CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>';
+
+  function ibxFresh() {
+    return { sub: null, open: null, at: Date.now() - INBOX_MAIN_MS + INBOX_FIRST_MS, reading: 0, err: false, replying: null, setup: 0,
+      line: null, nt: null };
+  }
+  view.ibx = ibxFresh();
+  const settingsScreen = () => view.screen === 'settings' || view.screen === 'review';
+  const str = (v) => (typeof v === 'string' ? v : '');
+  function inboxData() {
+    const b = view.data?.inbox;
+    return b && typeof b === 'object' && !Array.isArray(b) ? b : null;
+  }
+  // The payload's items with an id the bridges accept and a known kind. Every string is escaped where it is drawn.
+  function inboxItems(b = inboxData()) {
+    if (!Array.isArray(b?.items)) return [];
+    return b.items.filter((i) => i && typeof i === 'object' && IBX_ID.test(str(i.id)) && Object.hasOwn(KIND_LINE, str(i.kind)));
+  }
+  const needsYou = (i) => OPEN_KINDS.has(i.kind) && i.status === 'open';
+  const needCount = () => inboxItems().filter(needsYou).length;
+  function inboxMachines(b = inboxData()) {
+    const list = Array.isArray(b?.machines) ? b.machines.filter((m) => m && typeof m === 'object' && IBX_ID.test(str(m.id)) && str(m.name)) : [];
+    if (!list.some((m) => m.id === 'local')) list.unshift({ id: 'local', name: 'This Mac' });
+    return list;
+  }
+  // "this Mac" in the Mac panel, "your Mac" on the phone; another computer by its (cleaned) name.
+  function machineText(id, name, cap = false) {
+    if (id === 'local') return net.mode === 'bridge' ? (cap ? 'This Mac' : 'this Mac') : (cap ? 'Your Mac' : 'your Mac');
+    return cleanTitle(name) || '';
+  }
+  // Offline: the contract's machines carry no status, so the page also reads the k38 offline marker rows (agents) and the
+  // Settings › Computers list when they are there. An optional status / online on the machine wins.
+  function machineOff(m) {
+    if (!m || m.id === 'local') return false;
+    if (m.online === false || m.status === 'offline') return true;
+    const comps = view.data?.computers?.list;
+    if (Array.isArray(comps) && comps.some((c) => c && c.id === m.id && c.status === 'offline')) return true;
+    const ag = view.data?.agents;
+    return Array.isArray(ag) && ag.some((a) => a && a.machineOffline === true && (a.machine === m.name || a.machine === m.id));
+  }
+  const clipText = (s, n) => {
+    const cps = Array.from(String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim());
+    return cps.length > n ? `${cps.slice(0, n - 1).join('')}…` : cps.join('');
+  };
+  function metaOf(i, now) {
+    const st = OPEN_KINDS.has(i.kind) ? KIND_LINE[i.kind] : i.kind === 'task' ? own(TASK_LINE, i.status, '')
+      : i.kind === 'done' ? own(DONE_LINE, i.status, 'Done') : KIND_LINE[i.kind];
+    const t = Date.parse(str(i.at));
+    const live = i.kind === 'task' && !TASK_END.has(i.status); // a running task: how long it has run
+    const when = !Number.isFinite(t) ? '' : now - t < MIN ? (live ? '' : 'just now') : live ? dur(now - t) : `${dur(now - t)} ago`;
+    return [machineText(i.machine, i.machineName, true), st, when].filter(Boolean).join(' · ');
+  }
+
+  // ---- reads ----
+  // Reads only when one is due (or forced by the owner opening the Inbox); never two at once. The phone sends them as
+  // actions too (one request at a time), so they stay rare off the Inbox screen.
+  function inboxRead(force = false) {
+    const now = Date.now();
+    if (net.mode === 'http' && (!net.token || net.state !== 'live')) return;
+    if (view.ibx.reading && now - view.ibx.reading < INBOX_WAIT_MS) return;
+    if (!force && now - view.ibx.at < (view.screen === 'inbox' ? INBOX_OPEN_MS : INBOX_MAIN_MS)) return;
+    view.ibx.at = now;
+    view.ibx.reading = now;
+    send({ action: 'inbox' });
+  }
+  // A new inbox payload (render() already keeps it): the read is over; a reply whose question is no longer open closes
+  // (what was typed goes with it).
+  function inboxArrived() {
+    view.ibx.reading = 0;
+    view.ibx.err = false;
+    const t = view.tell;
+    if (t?.kind === 'reply' && !inboxItems().some((i) => i.id === t.id && needsYou(i) && i.canReply === true)) {
+      const f = tellField();
+      if (f) f.value = '';
+      view.tell = null;
+      tellViewport(false);
+    }
+  }
+  function reposArrived(p) {
+    const nt = view.ibx.nt;
+    if (!p || typeof p !== 'object' || !nt || p.machine !== nt.machine) return; // an answer for a computer no longer picked
+    const list = Array.isArray(p.list)
+      ? p.list.filter((r) => r && typeof r === 'object' && IBX_ID.test(str(r.id))).map((r) => ({ id: r.id, name: clipText(r.name, 60) || r.id }))
+      : null;
+    view.repos = { machine: p.machine, list, err: !list };
+    nt.repoWait = false;
+    if (nt.repo && !list?.some((r) => r.id === nt.repo)) nt.repo = null;
+  }
+  function ibxLine(where, ok, text, html = '') {
+    const at = Date.now();
+    view.ibx.line = { where, ok, text, html, at };
+    if (ok) setTimeout(() => { if (view.ibx.line?.at === at) { view.ibx.line = null; paint(); } }, IBX_LINE_MS + 50);
+  }
+  const ibxLineFor = (where) => {
+    const l = view.ibx.line;
+    return l && l.where === where && (!l.ok || Date.now() - l.at < IBX_LINE_MS) ? l : null;
+  };
+  // The bridges' answers, matched by action (the Mac's refusals carry id ""; a started task's id is its machine).
+  function inboxResult(r) {
+    const ok = r.ok === true;
+    switch (r.action) {
+      case 'inbox':
+        view.ibx.reading = 0;
+        if (ok && r.inbox && typeof r.inbox === 'object') return render({ inbox: r.inbox }); // the phone: the answer carries it
+        if (!ok) view.ibx.err = true;
+        break;
+      case 'repos':
+        if (ok && r.repos && typeof r.repos === 'object') return render({ repos: r.repos });
+        if (!ok && view.ibx.nt?.repoWait) {
+          view.ibx.nt.repoWait = false;
+          view.repos = { machine: view.ibx.nt.machine, list: null, err: true };
+        }
+        break;
+      case 'inbox-reply': {
+        const id = view.ibx.replying?.id ?? (IBX_ID.test(str(r.id)) ? r.id : 'top');
+        view.ibx.replying = null;
+        ibxLine(id, ok, ok ? 'Sent' : fixedLine(r.why, 'Not sent.'));
+        if (ok && net.mode === 'http') { view.ibx.reading = 0; inboxRead(true); } // the Mac reads again by itself
+        break;
+      }
+      case 'task-new': {
+        const nt = view.ibx.nt;
+        if (ok) {
+          const on = nt?.startOn ? ` on ${nt.startOn}` : '';
+          if (nt) {
+            const f = ntField();
+            if (f) f.value = '';
+            view.ibx.nt = null;
+            if (view.ibx.sub) {
+              view.ibx.sub = null;
+              view.slide = motionOk() ? { dir: 'back', at: Date.now() } : null;
+            }
+          }
+          ibxLine('top', true, `Started${on}`);
+          if (net.mode === 'http') { view.ibx.reading = 0; inboxRead(true); }
+        } else if (nt?.starting) {
+          Object.assign(nt, { starting: 0, step: 'edit', head: '', line: fixedLine(r.why, 'Not started.') });
+        } else ibxLine('top', false, fixedLine(r.why, 'Not started.'));
+        break;
+      }
+      case 'inbox-setup':
+        view.ibx.setup = 0;
+        if (ok) {
+          ibxLine('setup', true, 'Set up');
+          view.ibx.reading = 0; // a read sent before the setup may still be out: read the new state anyway
+          inboxRead(true);
+        } else ibxLine('setup', false, '', SETUP_HTML);
+        break;
+      default: return;
+    }
+    paint();
+  }
+
+  // ---- the Inbox screen ----
+  function inboxButton() {
+    const n = needCount();
+    const label = n ? `Inbox, ${plural(n, 'item needs', 'items need')} you` : 'Inbox';
+    return `<button class="ic ibx" title="Inbox" aria-label="${esc(label)}" data-do="inbox">${IC.inbox}` +
+      (n ? `<span class="badge" aria-hidden="true">${n > 99 ? '99+' : n}</span>` : '') + '</button>';
+  }
+  function needRow(i, now) {
+    const sending = view.ibx.replying?.id === i.id;
+    const res = ibxLineFor(i.id);
+    const meta = sending ? 'Sending…' : res ? res.text : metaOf(i, now);
+    const composing = view.tell?.kind === 'reply' && view.tell.id === i.id;
+    const reply = i.canReply === true && !sending && !composing && !view.ibx.replying;
+    const pv = clipText(i.preview, PREVIEW_MAX);
+    return S('div', { class: 'it ib', 'data-key': `ib:${i.id}` }, [
+      avatar(shapeOf(str(i.dispatchId) || i.id), 'wait', 22),
+      `<div class="tx"><div class="nm">${esc(clipText(i.title, TITLE_MAX) || KIND_LINE[i.kind])}</div>` +
+        (pv ? `<div class="q">${esc(pv)}</div>` : '') + `<div class="d${res && !res.ok ? ' warn' : ''}">${esc(meta)}</div></div>`,
+      reply ? `<button class="pill" data-do="reply" data-id="${esc(i.id)}">Reply</button>` : '', // quiet: the only blue is Send / Start
+    ], `ib:${i.id}`);
+  }
+  // A running or finished row; with something to read it is a button that opens it in place (one click, details).
+  function infoRow(i, face, now, more) {
+    const pv = clipText(more, PREVIEW_MAX);
+    const open = Boolean(pv) && view.ibx.open === i.id;
+    const kids = [avatar(shapeOf(str(i.dispatchId) || i.id), face, 22),
+      `<span class="tx"><span class="nm">${esc(clipText(i.title, TITLE_MAX) || KIND_LINE[i.kind])}</span>` +
+        `<span class="d">${esc(metaOf(i, now))}</span>${open ? `<span class="q">${esc(pv)}</span>` : ''}</span>`,
+      pv ? `<span class="chev${open ? ' on' : ''}" aria-hidden="true">${IC_NEXT}</span>` : ''];
+    return pv
+      ? S('button', { class: 'it ib', 'data-do': 'ib-open', 'data-id': i.id, 'data-key': `ib:${i.id}`, 'aria-expanded': String(open) }, kids, `ib:${i.id}`)
+      : S('div', { class: 'it ib', 'data-key': `ib:${i.id}` }, kids, `ib:${i.id}`);
+  }
+  function setupCard() {
+    const busy = view.ibx.setup > 0;
+    const l = ibxLineFor('setup');
+    const line = l ? `<div class="s${l.ok ? '' : ' warn'}">${l.html || esc(l.text)}</div>` : '';
+    return { key: 'setup', html: '<div class="card ibs"><div class="msg"><div><div class="t">Not set up yet</div>' +
+      '<div class="s">Set it up once to start tasks and answer agents here, on this Mac and your other computers.</div>' + line +
+      `<div class="btns"><button class="pill blue" data-do="inbox-setup"${busy ? ' aria-disabled="true"' : ''}>${busy ? 'Setting up…' : 'Set up'}</button></div>` +
+      '</div></div></div>' };
+  }
+  function inboxTree() {
+    const b = inboxData();
+    if (view.ibx.sub === 'new' && view.ibx.nt) return ntTree(b, view.ibx.nt);
+    const now = finite(view.data?.status?.now) ? view.data.status.now : Date.now(); // as the main panel: the reading's time
+    const newBtn = b?.ready === true ? '<button class="pill nt-go" data-do="nt-open" data-key="nt-open">New task</button>' : '';
+    const top = { key: 'top', html: `<div class="top"><button class="ic" data-do="back" data-key="back" aria-label="Back" title="Back">${IC_BACK}</button>` +
+      `<span class="ttl">Inbox</span>${newBtn}</div>` };
+    const body = [];
+    const l = ibxLineFor('top');
+    if (l) body.push({ key: 'line', html: `<div class="ibl${l.ok ? '' : ' warn'}" role="status">${esc(l.text)}</div>` });
+    if (!b) {
+      body.push({ key: 'wait', html: view.ibx.err
+        ? '<div class="card"><div class="msg"><div><div class="t">Couldn’t read the inbox</div><div class="btns">' +
+          '<button class="pill" data-do="inbox-read">Try again</button></div></div></div></div>'
+        : '<div class="ibl">Reading the inbox…</div>' });
+    } else {
+      if (b.ready !== true) body.push(setupCard());
+      else if (view.ibx.err) body.push({ key: 'err', html: '<div class="ibl">Couldn’t read the inbox just now; this is the last reading.</div>' });
+      const items = inboxItems(b);
+      const need = items.filter(needsYou);
+      const doneFor = new Set(items.filter((i) => i.kind === 'done' && i.dispatchId).map((i) => i.dispatchId));
+      const running = items.filter((i) => i.kind === 'task' && !TASK_END.has(i.status) && !(i.dispatchId && doneFor.has(i.dispatchId)));
+      const runIds = new Set(running.map((i) => i.dispatchId).filter(Boolean));
+      const news = new Map(); // a running task's newest update (items are newest first)
+      for (const i of items) if (i.kind === 'message' && i.dispatchId && runIds.has(i.dispatchId) && !news.has(i.dispatchId)) news.set(i.dispatchId, i.preview);
+      const done = items.filter((i) => i.kind === 'done' || (i.kind === 'message' && !(i.dispatchId && runIds.has(i.dispatchId))) ||
+        (i.kind === 'task' && TASK_END.has(i.status) && !(i.dispatchId && doneFor.has(i.dispatchId)))).slice(0, DONE_MAX);
+      const sheet = tellSheet();
+      if (need.length) {
+        body.push(...sGroup('need', 'Needs you', need.flatMap((i) => [needRow(i, now),
+          ...(view.tell?.kind === 'reply' && view.tell.id === i.id && !sheet ? [tellItem(view.tell)] : [])])));
+      }
+      if (running.length) body.push(...sGroup('run', 'Running', running.map((i) => infoRow(i, 'work', now, news.get(i.dispatchId) ?? ''))));
+      if (done.length) {
+        body.push(...sGroup('done', 'Done', done.map((i) => infoRow(i, i.status === 'failed' || i.status === 'cancelled' || i.status === 'canceled' ? 'slow'
+          : i.kind === 'message' ? 'idle' : 'done', now, i.preview))));
+      }
+      if (b.ready === true && !need.length && !running.length && !done.length) {
+        body.push(S('div', { class: 'empty' }, [avatar('egg', 'idle', 30), '<div><div class="nm">Nothing here yet</div>' +
+          '<div class="s">Start a task; what the agents ask and report shows up here.</div></div>'], 'empty'));
+      }
+    }
+    const kids = [top, S('div', { class: 'sbody', id: 'k-sbody' }, body, 'body', true)];
+    if (view.tell?.kind === 'reply' && tellSheet()) kids.push(tellItem(view.tell)); // the phone's bottom sheet
+    return screenShell('inbox', ' inbox', 'Kadans inbox', kids);
+  }
+
+  // ---- reply (the k49 composer) ----
+  function startReply(id) {
+    const it = inboxItems().find((i) => i.id === id);
+    if (!it || !needsYou(it) || it.canReply !== true || view.ibx.sub || view.ibx.replying) return;
+    if (view.tell) endTell(false);
+    const title = clipText(it.title, TITLE_MAX) || KIND_LINE[it.kind];
+    view.ibx.open = null;
+    if (view.ibx.line?.where === it.id) view.ibx.line = null;
+    view.tell = { kind: 'reply', id: it.id, title, short: shortTitle(title), machine: machineText(it.machine, it.machineName) || 'its computer', n: 0, why: 'empty' };
+    tellViewport(true);
+    renderScreen();
+    const sh = tellSheet() && motionOk() ? view.stree?.kids?.find((k) => k.key === `tell:${it.id}`)?.node : null;
+    if (sh?.classList) {
+      sh.classList.add('up');
+      busy(320);
+      setTimeout(() => sh.classList.remove('up'), 340);
+    }
+    try { tellField()?.focus?.(); } catch { /* no focus in this host */ }
+  }
+  // From sendTell: the text passed the checks. The field is emptied before anything goes out.
+  function replySend(t, f, text) {
+    const it = inboxItems().find((i) => i.id === t.id);
+    f.value = '';
+    endTell(false);
+    if (!it || !needsYou(it) || it.canReply !== true || view.ibx.replying) {
+      ibxLine(t.id, false, 'That question was answered or is gone. Nothing was sent.');
+      paint();
+      return;
+    }
+    const at = Date.now();
+    view.ibx.replying = { id: it.id, at };
+    send({ action: 'inbox-reply', id: it.id, text });
+    setTimeout(() => {
+      if (view.ibx.replying?.at !== at) return;
+      view.ibx.replying = null;
+      ibxLine(it.id, false, 'No answer in time. Check the inbox before replying again.');
+      paint();
+    }, REPLY_WAIT_MS);
+    paint();
+  }
+  function setupGo() {
+    if (view.ibx.setup) return;
+    const at = Date.now();
+    view.ibx.setup = at;
+    view.ibx.line = null;
+    send({ action: 'inbox-setup' });
+    // until the bridges answer inbox-setup (k53), nothing may come back: the button ends with the same fixed line
+    setTimeout(() => {
+      if (view.ibx.setup !== at) return;
+      view.ibx.setup = 0;
+      ibxLine('setup', false, '', SETUP_HTML);
+      paint();
+    }, SETUP_WAIT_MS);
+    renderScreen();
+  }
+  // Leaving the Inbox (or closing the popover, or reset): an open reply and a new task go, and their text with them.
+  function inboxDrop() {
+    const f = view.ibx?.nt ? ntField() : null;
+    if (f) f.value = '';
+    if (view.ibx) {
+      view.ibx.nt = null;
+      view.ibx.sub = null;
+      view.ibx.open = null;
+    }
+    if (view.tell?.kind === 'reply') {
+      const g = tellField();
+      if (g) g.value = '';
+      view.tell = null;
+      tellViewport(false);
+    }
+  }
+  const inboxLeave = inboxDrop;
+
+  // ---- new task ----
+  const ntField = () => tellField(view.stree, 'ntField');
+  function ntOpen() {
+    const b = inboxData();
+    if (!b || b.ready !== true || view.ibx.sub) return;
+    if (view.tell) endTell(false);
+    const d = b.defaults && typeof b.defaults === 'object' ? b.defaults : {}; // not in the k51 contract yet: used when present
+    const model = MODEL_OK.test(str(d.model)) ? d.model : '';
+    view.ibx.nt = { machine: null, repo: null, q: '', opts: false, model, effort: model && EFFORTS.includes(d.effort) ? d.effort : '',
+      step: 'edit', head: '', starting: 0, startOn: '', line: null, n: 0, why: 'empty', repoWait: false };
+    view.ibx.sub = 'new';
+    view.ibx.line = null;
+    view.slide = motionOk() ? { dir: 'in', at: Date.now() } : null;
+    view.sScroll = 0;
+    ntMachine('local', false);
+    renderScreen();
+    root().querySelector('[data-do="back"]')?.focus();
+  }
+  function ntClose() {
+    const f = ntField();
+    if (f) f.value = '';
+    view.ibx.nt = null;
+    view.ibx.sub = null;
+    view.slide = motionOk() ? { dir: 'back', at: Date.now() } : null;
+    renderScreen();
+    root().querySelector('[data-do="nt-open"]')?.focus();
+  }
+  const ntMachineOk = (nt) => { const m = inboxMachines().find((x) => x.id === nt.machine); return m && !machineOff(m) ? m : null; };
+  const ntRepoOk = (nt) => (view.repos?.machine === nt.machine ? view.repos.list?.find((r) => r.id === nt.repo) ?? null : null);
+  function ntMachine(id, draw = true) {
+    const nt = view.ibx.nt;
+    if (!nt || nt.step !== 'edit' || nt.starting) return;
+    const m = inboxMachines().find((x) => x.id === id);
+    if (!m || machineOff(m)) return; // an offline computer is never picked (its button is disabled too)
+    if (nt.machine !== m.id) {
+      Object.assign(nt, { machine: m.id, repo: null, q: '', line: null });
+      const q = tellField(view.stree, 'ntQ');
+      if (q) q.value = '';
+      ntRepos();
+    }
+    if (draw) renderScreen();
+  }
+  function ntRepos() {
+    const nt = view.ibx.nt;
+    if (!nt?.machine) return;
+    nt.repoWait = true;
+    if (view.repos?.machine !== nt.machine) view.repos = null;
+    else view.repos.err = false;
+    send({ action: 'repos', machine: nt.machine });
+  }
+  function ntSearch(input) {
+    const nt = view.ibx.nt;
+    if (!nt) return;
+    const q = String(input.value ?? '').slice(0, 60);
+    if (q === nt.q) return;
+    nt.q = q;
+    renderScreen();
+  }
+  function ntInput() {
+    const nt = view.ibx.nt;
+    const f = ntField();
+    if (!nt || !f) return;
+    try {
+      if (f.style) {
+        f.style.height = 'auto';
+        f.style.height = `${f.scrollHeight}px`;
+        settle();
+      }
+    } catch { /* no layout in this host */ }
+    const c = tellCheck(f.value);
+    const why = c.ok ? null : c.why;
+    if (c.n === nt.n && why === nt.why) return;
+    nt.n = c.n;
+    nt.why = why;
+    renderScreen();
+  }
+  const headOf = (t) => { const cps = Array.from(String(t).replace(/\s+/g, ' ').trim()); return cps.length > NT_HEAD ? `${cps.slice(0, NT_HEAD).join('')}…` : cps.join(''); };
+  // Next: everything is checked again (computer online, project of that computer, text), then the confirm step names it.
+  function ntNext() {
+    const nt = view.ibx.nt;
+    const f = ntField();
+    if (!nt || nt.step !== 'edit' || nt.starting || !f) return;
+    const c = tellCheck(f.value);
+    nt.n = c.n;
+    nt.why = c.ok ? null : c.why;
+    const m = ntMachineOk(nt);
+    const r = ntRepoOk(nt);
+    nt.line = !m ? 'Pick a computer' : !r ? 'Pick a project' : null;
+    if (c.ok && m && r) {
+      nt.step = 'confirm';
+      nt.head = headOf(c.text);
+    }
+    renderScreen();
+    if (nt.step === 'confirm') root().querySelector('[data-do="nt-start"]')?.focus();
+  }
+  function ntEdit() {
+    const nt = view.ibx.nt;
+    if (!nt || nt.starting) return;
+    nt.step = 'edit';
+    nt.head = '';
+    renderScreen();
+    try { ntField()?.focus?.(); } catch { /* fine */ }
+  }
+  // Start, the only place that sends task-new: once, with confirmed: true, and only for what the confirm named.
+  function ntStart() {
+    const nt = view.ibx.nt;
+    const f = ntField();
+    if (!nt || nt.step !== 'confirm' || nt.starting || !f) return;
+    const c = tellCheck(f.value);
+    const m = ntMachineOk(nt);
+    const r = ntRepoOk(nt);
+    if (!c.ok || !m || !r || headOf(c.text) !== nt.head) return ntEdit(); // something changed: confirm again
+    const at = Date.now();
+    nt.starting = at;
+    nt.startOn = machineText(m.id, m.name);
+    nt.line = null;
+    const msg = { action: 'task-new', machine: m.id, repo: `id:${r.id}`, text: c.text };
+    if (nt.model) {
+      msg.model = nt.model;
+      if (nt.effort) msg.effort = nt.effort;
+    }
+    msg.confirmed = true;
+    send(msg);
+    setTimeout(() => {
+      const n = view.ibx.nt;
+      if (n?.starting !== at) return;
+      Object.assign(n, { starting: 0, step: 'edit', head: '', line: 'No answer yet. Check the inbox before starting it again.' });
+      paint();
+    }, START_WAIT_MS);
+    renderScreen();
+  }
+  function ntProjects(nt) {
+    if (!nt.machine) return [];
+    const rp = view.repos?.machine === nt.machine ? view.repos : null;
+    if (!rp?.list) {
+      return [rp?.err && !nt.repoWait
+        ? { key: 'nt-rerr', html: '<div class="it"><div class="tx"><div class="d warn">Couldn’t read the projects there.</div></div>' +
+          '<button class="pill quiet" data-do="nt-repos-again">Try again</button></div>' }
+        : { key: 'nt-rwait', html: '<div class="it"><div class="tx"><div class="d">Loading projects…</div></div></div>' }];
+    }
+    if (!rp.list.length) return [{ key: 'nt-rnone', html: '<div class="it"><div class="tx"><div class="d">No git projects there.</div></div></div>' }];
+    const q = nt.q.trim().toLowerCase();
+    const hits = rp.list.filter((r) => !q || r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q));
+    let shown = hits.slice(0, REPO_SHOW);
+    const sel = rp.list.find((r) => r.id === nt.repo);
+    if (sel && !shown.includes(sel)) shown = [sel, ...shown.slice(0, REPO_SHOW - 1)];
+    const out = [];
+    if (rp.list.length > REPO_SHOW) {
+      out.push({ key: 'nt-q', ntQ: true, html: '<input class="fld ntq" type="text" data-key="nt-q" placeholder="Search projects" maxlength="60" ' +
+        'aria-label="Search projects" spellcheck="false" autocomplete="off">' });
+    }
+    for (const r of shown) {
+      const on = r.id === nt.repo;
+      out.push(S('button', { class: 'it pk', 'aria-pressed': String(on), 'data-do': 'nt-repo', 'data-id': r.id, 'data-key': `ntr:${r.id}` },
+        [`<span class="tx">${esc(r.name)}</span>`, `<span class="ck" aria-hidden="true">${IC_CHECK}</span>`], `ntr:${r.id}`));
+    }
+    if (!shown.length) out.push({ key: 'nt-rnone', html: '<div class="it"><div class="tx"><div class="d">No project matches.</div></div></div>' });
+    else if (hits.length > shown.length) out.push({ key: 'nt-rmore', html: `<div class="d sub">${hits.length - shown.length} more; search to narrow</div>` });
+    return out;
+  }
+  function ntTree(b, nt) {
+    const confirm = nt.step === 'confirm';
+    const busyNow = nt.starting > 0;
+    const ms = inboxMachines(b);
+    const machines = S('div', { class: 'seg mach', role: 'group', 'aria-label': 'Computer' }, ms.map((m) => {
+      const off = machineOff(m);
+      return S('button', { 'aria-pressed': String(nt.machine === m.id), 'data-do': 'nt-machine', 'data-id': m.id, 'data-key': `ntm:${m.id}`,
+        'aria-disabled': off ? 'true' : null, title: off ? 'Offline' : null },
+      [esc(m.id === 'local' ? 'This Mac' : clipText(m.name, 40)) + (off ? ' <span class="off">· offline</span>' : '')], `ntm:${m.id}`);
+    }), 'mach', true);
+    const where = [
+      S('div', { class: 'it col' }, ['<div class="lr"><span>Computer</span></div>', machines], 'nt-where', true),
+      ...(nt.machine ? [{ key: 'nt-pl', html: '<div class="it ntl"><div class="tx"><div>Project</div></div></div>' }, ...ntProjects(nt)] : []),
+    ];
+    const hint = nt.why && nt.why !== 'empty' ? TELL_HINT[nt.why] : '';
+    const what = [
+      { key: 'ntx', ntField: true, html: '<textarea class="tl ntx" data-key="ntx" rows="3" placeholder="What should it do?" aria-label="Task for the agent" ' +
+        'spellcheck="true" autocomplete="off" enterkeyhint="enter"></textarea>' },
+      { key: 'nt-hint', html: `<div class="d${hint ? ' warn' : ''}" aria-live="polite">${esc(hint || (tellSheet() ? 'Tap the mic on the keyboard to speak' : ''))}</div>` },
+    ];
+    const ml = own(Object.fromEntries(MODELS), nt.model, nt.model);
+    const optVal = nt.model ? `${ml}${nt.effort ? ` · ${nt.effort}` : ''}` : 'Default model';
+    const opts = [S('button', { class: 'it nav', 'data-do': 'nt-opts', 'data-key': 'nt-opts', 'aria-expanded': String(nt.opts), 'aria-label': `Options: ${optVal}` },
+      ['<span class="tx">Options</span>', `<span class="val">${esc(optVal)}</span>`, `<span class="chev${nt.opts ? ' on' : ''}" aria-hidden="true">${IC_NEXT}</span>`], 'nt-opts')];
+    if (nt.opts) {
+      const seg = (key, label, list, cur, off) => S('div', { class: 'seg', role: 'group', 'aria-label': label }, list.map(([v, t]) =>
+        S('button', { 'aria-pressed': String(cur === v), 'data-do': key, 'data-v': v, 'data-key': `${key}:${v}`, 'aria-disabled': off ? 'true' : null }, [esc(t)], `${key}:${v}`)), key, true);
+      opts.push(S('div', { class: 'it' }, ['<div class="tx"><div>Model</div></div>', seg('nt-model', 'Model', MODELS, nt.model, false)], 'nt-om', true));
+      opts.push(S('div', { class: 'it' }, [`<div class="tx"><div>Effort</div>${nt.model ? '' : '<div class="d">With a model</div>'}</div>`,
+        seg('nt-effort', 'Effort', [['', 'Default'], ...EFFORTS.map((e) => [e, e])], nt.effort, !nt.model)], 'nt-oe', true));
+    }
+    const m = ntMachineOk(nt);
+    const r = ntRepoOk(nt);
+    const ready = Boolean(m && r && nt.n > 0 && !nt.why);
+    let foot;
+    if (confirm && m && r) {
+      const line = `Start on ${machineText(m.id, m.name)} · ${r.name}: ${nt.head}`;
+      foot = { key: 'nt-cf', html: '<div class="card ncf" role="group" aria-label="Confirm the new task">' +
+        `<div class="t">${esc(line)}</div><div class="s">A new worktree and a Claude chat start there${nt.model ? ` (${esc(optVal)})` : ''}.</div>` +
+        `<div class="btns"><button class="pill quiet" data-do="nt-edit"${busyNow ? ' aria-disabled="true"' : ''}>Edit</button>` +
+        `<button class="pill blue" data-do="nt-start"${busyNow ? ' aria-disabled="true"' : ''}>${busyNow ? 'Starting…' : 'Start'}</button></div></div>` };
+    } else {
+      foot = { key: 'nt-foot', html: `<div class="tbar ntb"><span class="tmsg${nt.line ? ' warn' : ''}" aria-live="polite">${esc(nt.line ?? '')}</span>` +
+        '<button class="pill quiet" data-do="nt-cancel">Cancel</button>' +
+        `<button class="pill blue" data-do="nt-next" aria-keyshortcuts="Meta+Enter"${ready ? '' : ' aria-disabled="true"'}>Next</button></div>` };
+    }
+    const body = [...sGroup('nt-where', '', where), ...sGroup('nt-what', '', what), ...sGroup('nt-opts', '', opts), foot];
+    return screenShell('inbox:new', ' inbox', 'Kadans inbox: New task',
+      [topItem('New task'), S('div', { class: confirm ? 'sbody confirming' : 'sbody', id: 'k-sbody' }, body, 'body', true)]);
+  }
+  function inboxClick(b) {
+    if (view.screen !== 'inbox') return false;
+    const id = b.dataset.id;
+    const nt = view.ibx.nt;
+    switch (b.dataset.do) {
+      case 'reply': startReply(id); return true;
+      case 'ib-open': view.ibx.open = view.ibx.open === id ? null : id; renderScreen(); return true;
+      case 'inbox-read': view.ibx.err = false; inboxRead(true); renderScreen(); return true;
+      case 'inbox-setup': setupGo(); return true;
+      case 'nt-open': ntOpen(); return true;
+      case 'nt-cancel': ntClose(); return true;
+      case 'nt-machine': ntMachine(id); return true;
+      case 'nt-repos-again': if (nt && nt.step === 'edit') { ntRepos(); renderScreen(); } return true;
+      case 'nt-repo':
+        if (nt && nt.step === 'edit' && !nt.starting && view.repos?.machine === nt.machine && view.repos.list?.some((r) => r.id === id)) {
+          nt.repo = id;
+          nt.line = null;
+          renderScreen();
+        }
+        return true;
+      case 'nt-opts': if (nt) { nt.opts = !nt.opts; renderScreen(); } return true;
+      case 'nt-model':
+        if (nt && nt.step === 'edit' && MODELS.some(([v]) => v === b.dataset.v)) {
+          nt.model = b.dataset.v;
+          if (!nt.model) nt.effort = '';
+          renderScreen();
+        }
+        return true;
+      case 'nt-effort':
+        if (nt && nt.step === 'edit' && nt.model && (b.dataset.v === '' || EFFORTS.includes(b.dataset.v))) {
+          nt.effort = b.dataset.v;
+          renderScreen();
+        }
+        return true;
+      case 'nt-next': ntNext(); return true;
+      case 'nt-edit': ntEdit(); return true;
+      case 'nt-start': ntStart(); return true;
+      default: return false;
     }
   }
 
@@ -2487,7 +3122,8 @@
   // never overlap, and actions go out in order.
   const POLL_MS = 2000;
   const TOKEN_KEY = 'kadans.token';
-  const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder', 'agent-send']);
+  const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder', 'agent-send',
+    'inbox', 'inbox-reply', 'task-new', 'repos', 'inbox-setup']); // k52: the inbox (k51 allows the first four on the server; k53 adds setup)
   // net.state: 'idle' (bridge) | 'pairing' | 'live' | 'unpaired' (no token, or a 401) | 'offline' (the Mac did not answer)
   // | 'off' (503: phone access is turned off on the Mac) | 'install' (k29: iOS Safari with a code, "Add to Home Screen")
   // net.code: the pair code held back on the 'install' screen until "Use it in Safari instead" (never in the DOM).
@@ -2860,8 +3496,9 @@
           root().querySelector(`[data-do="sub"][data-id="${sub}"]`)?.focus();
           return;
         }
+        const from = view.screen;
         go(screen, 'back');
-        root().querySelector(screen === 'main' ? '[data-do="settings"]' : '[data-do="review"]')?.focus();
+        root().querySelector(screen !== 'main' ? '[data-do="review"]' : from === 'inbox' ? '[data-do="inbox"]' : '[data-do="settings"]')?.focus();
       };
       const panel = root().firstElementChild;
       if (view.leaving) return;
@@ -2892,7 +3529,8 @@
         root().querySelector('[data-do="apply"], [data-do="back"]')?.focus();
         return true;
       case 'back':
-        if (view.screen === 'settings' && view.sub) back('settings', view.sub);
+        if (view.screen === 'inbox' && view.ibx.sub) ntClose(); // k52: New task goes back to the Inbox
+        else if (view.screen === 'settings' && view.sub) back('settings', view.sub);
         else back(view.screen === 'review' ? view.from : 'main');
         return true;
       case 'set': {
@@ -2923,6 +3561,13 @@
           renderScreen();
         }
         return true;
+      case 'inbox': // k52: the bottom bar's Inbox pushes the Inbox screen and reads it at once
+        if (view.screen !== 'main') return true;
+        if (view.tell) endTell(false);
+        go('inbox');
+        inboxRead(true);
+        root().querySelector('[data-do="back"]')?.focus();
+        return true;
       case 'apply': view.applyConfirm = true; renderScreen(); root().querySelector('[data-do="apply-go"]')?.focus(); return true;
       case 'apply-cancel': view.applyConfirm = false; renderScreen(); root().querySelector('[data-do="apply"]')?.focus(); return true;
       case 'apply-go':
@@ -2932,13 +3577,15 @@
         renderScreen();
         send({ action: 'install-apply' });
         return true;
-      default: return false;
+      default: return inboxClick(b); // k52
     }
   }
 
   // Sliders: the number follows while dragging; one config-set when released (not one per step).
   function onInput(e) {
     const r = e.target;
+    if (r?.classList?.contains?.('ntx')) { ntInput(); return; } // k52: the new task's text
+    if (r?.getAttribute?.('data-key') === 'nt-q') { ntSearch(r); return; } // k52: the project search
     if (r?.classList?.contains?.('tl')) { tellInput(); return; } // k49
     if (!r.dataset?.set) return;
     const n = root().querySelector(`[data-num="${CSS.escape(r.dataset.set)}"]`);
@@ -2970,6 +3617,13 @@
   }
 
   function onKey(e) {
+    // k52: the new task's text owns its keys too: Cmd-Enter goes on to the confirm step (never straight to a start),
+    // Escape goes back to the Inbox (the text goes with it).
+    if (view.screen === 'inbox' && view.ibx.nt && e.target?.classList?.contains?.('ntx')) {
+      if (e.isComposing) return;
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault?.(); ntNext(); } else if (e.key === 'Escape') { e.preventDefault?.(); ntClose(); }
+      return;
+    }
     // k49: the message field owns every key: Cmd-Enter (Ctrl-Enter) sends, Escape cancels, Enter is a new line, and no
     // key reaches the row shortcuts or closes the popover. Dictation and input methods compose first (isComposing).
     if (view.tell && e.target?.classList?.contains?.('tl')) {
@@ -3000,7 +3654,9 @@
     }
     if (e.key !== 'Escape') return;
     if (view.screen !== 'main') {
-      if (view.applyConfirm) {
+      if (view.screen === 'inbox' && view.tell) endTell(); // k52: an open reply closes before the screen goes back
+      else if (view.screen === 'inbox' && view.ibx.nt?.step === 'confirm' && !view.ibx.nt.starting) ntEdit();
+      else if (view.applyConfirm) {
         view.applyConfirm = false;
         renderScreen();
       } else if (view.uninstallOpen) {
@@ -3099,6 +3755,7 @@
 
   // dev.html only: start a fixture from a clean slate (render keeps keys a payload leaves out).
   function reset() {
+    inboxDrop(); // k52: first, while the screen tree still holds the fields (the new task's text goes too)
     view.data = {};
     view.pending = {};
     view.screen = 'main';
@@ -3121,6 +3778,8 @@
     view.tell = null;
     view.telling = null;
     tellViewport(false);
+    view.ibx = ibxFresh();
+    view.repos = null;
     view.titles.clear();
     view.awayTitles.clear();
     view.order = null;
@@ -3130,7 +3789,10 @@
   // NSPopover): closed, the blink timer stops and nothing animates.
   function visible(on) {
     // k27/k28: closing the popover on Settings ends the app's device polling; reopening on Settings starts it again.
-    if (net.mode === 'bridge' && view.screen !== 'main' && (on !== false) !== view.shown) send({ action: on !== false ? 'settings' : 'settings-closed' });
+    if (net.mode === 'bridge' && settingsScreen() && (on !== false) !== view.shown) send({ action: on !== false ? 'settings' : 'settings-closed' });
+    // k52: closing the popover drops an open reply or new task (no draft kept); opening it reads the inbox (the badge)
+    if (on === false && view.screen === 'inbox') inboxDrop();
+    if (on !== false && !view.shown && Date.now() - view.ibx.at >= INBOX_REOPEN_MS) inboxRead(true);
     view.shown = on !== false;
     if (!view.shown) {
       cancelHold();
