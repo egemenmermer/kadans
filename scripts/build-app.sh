@@ -3,6 +3,8 @@
 # (KADANS_APPS_DIR overrides ~/Applications; `kadans setup` uses it).
 # --no-install: build only, no copy.
 # The repo path is baked into Info.plist (KadansRepo); KADANS_REPO overrides it at run time.
+# KADANS_BAKE_REPO bakes another path (release builds: ~/.kadans/app/current). KADANS_SIGN_ID signs with that identity,
+# hardened runtime and a secure timestamp instead of ad hoc (scripts/release-app.sh).
 # Nothing here starts at login: no login item, no launch agent.
 set -euo pipefail
 
@@ -36,7 +38,7 @@ cp "$BIN" "$APP/Contents/MacOS/Kadans"
 cp -R "$ROOT/app/web" "$APP/Contents/Resources/web"
 
 xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-REPO_XML="$(printf '%s' "$ROOT" | xml_escape)"
+REPO_XML="$(printf '%s' "${KADANS_BAKE_REPO:-$ROOT}" | xml_escape)"
 VERSION="$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo 0.1.0)"
 
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -60,11 +62,16 @@ cat > "$APP/Contents/Info.plist" <<EOF
 EOF
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-codesign --force -s - "$APP"
-codesign --verify "$APP"
+if [ -n "${KADANS_SIGN_ID:-}" ]; then
+  codesign --force --options runtime --timestamp -s "$KADANS_SIGN_ID" "$APP"
+  codesign --verify --strict "$APP"
+else
+  codesign --force -s - "$APP"
+  codesign --verify "$APP"
+fi
 
 if [ "$INSTALL" = 0 ]; then
-  echo "built $APP (repo: $ROOT); not installed (--no-install)"
+  echo "built $APP (repo: ${KADANS_BAKE_REPO:-$ROOT}); not installed (--no-install)"
   exit 0
 fi
 mkdir -p "$APPS"

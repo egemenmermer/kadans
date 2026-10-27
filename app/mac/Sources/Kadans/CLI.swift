@@ -24,11 +24,12 @@ enum Config {
         return nil
     }
 
-    /// KADANS_REPO, else the path baked into Info.plist (KadansRepo) by scripts/build-app.sh.
+    /// KADANS_REPO, else the path baked into Info.plist (KadansRepo) by scripts/build-app.sh (`~` allowed: release builds bake
+    /// ~/.kadans/app/current, where `kadans setup` keeps the CLI).
     static var repoDir: URL? {
         if let r = env["KADANS_REPO"], !r.isEmpty { return URL(fileURLWithPath: expand(r), isDirectory: true) }
         if let r = Bundle.main.object(forInfoDictionaryKey: "KadansRepo") as? String, !r.isEmpty {
-            return URL(fileURLWithPath: r, isDirectory: true)
+            return URL(fileURLWithPath: expand(r), isDirectory: true)
         }
         return nil
     }
