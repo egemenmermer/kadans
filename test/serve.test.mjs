@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -23,7 +23,7 @@ async function boot({ outputs = {}, webRoot, t = 1_000_000 } = {}) {
   const clock = { t };
   const calls = [];
   const run = async (args, o = {}) => {
-    calls.push({ args, timeout: o.timeout });
+    calls.push({ args, timeout: o.timeout, ...(o.input != null ? { input: o.input } : {}) });
     const key = args.join(' ');
     if (Object.hasOwn(outputs, key)) return outputs[key];
     if (key === 'status --json') return ok(STATUS);
@@ -260,7 +260,9 @@ test('actions: everything else is refused with 400 and runs nothing', async () =
     s.clock.t += 1000;
     assert.equal((await s.req('POST', '/api/action', { raw: '{"action":"stop","id":"a1"}', token, headers: { 'content-type': 'text/plain' } })).status, 415);
     assert.equal((await s.req('POST', '/api/action', { raw: '[1]', token, headers: { 'content-type': 'application/json' } })).status, 400);
-    assert.equal((await s.req('POST', '/api/action', { body: { action: 'stop', id: 'a1', pad: 'x'.repeat(5000) }, token })).status, 413);
+    // k48: an action body may hold agent-send's text (up to 24 KB, after auth); pairing stays at 4 KB
+    assert.equal((await s.req('POST', '/api/action', { body: { action: 'stop', id: 'a1', pad: 'x'.repeat(25_000) }, token })).status, 413);
+    assert.equal((await s.req('POST', '/api/pair', { body: { code: 'x', name: 'x'.repeat(5000) } })).status, 413);
     assert.equal((await s.req('GET', '/', { headers: { host: 'evil.example:7477' } })).status, 421, 'Host must be this server');
     assert.deepEqual(actionCalls(s.calls), []);
   } finally {
@@ -549,4 +551,72 @@ test('server limits and the static allow-list (review k30)', () => {
   const server = createPhoneServer({ home: mkdtempSync(join(tmpdir(), 'kadans-serve-')), run: async () => ({ code: 0, out: '', err: '', timedOut: false }) });
   assert.deepEqual([server.headersTimeout, server.requestTimeout, server.timeout, server.keepAliveTimeout, server.maxConnections], [10_000, 30_000, 30_000, 5_000, 64]);
   assert.deepEqual([...STATIC_FILES].sort(), ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'manifest.webmanifest', 'panel.css', 'panel.html', 'panel.js']);
+});
+
+// ---------- k48: agent-send ----------
+test('k48 actions: agent-send passes the text on stdin only, refuses bad input, is rate limited per device and never logged', async () => {
+  const s = await boot({ outputs: { 'agents --json': ok([...AGENTS, { id: 'remote:other:t-1:1', title: 'away' }]) } });
+  try {
+    const { token } = await s.pair();
+    const MSG = 'SECRET-MSG please carry on\nwith step two';
+    s.clock.t += 1000;
+    const r = await s.req('POST', '/api/action', { body: { action: 'agent-send', id: 'a1', text: `${MSG}\n` }, token });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(actionCalls(s.calls), [{ args: ['agent', 'send', 'a1'], timeout: 25_000, input: MSG }]);
+    assert.ok(!r.text.includes('SECRET-MSG'));
+    const ctl = (n) => String.fromCodePoint(n);
+    for (const body of [{ action: 'agent-send', id: 'zz', text: 'hi' }, { action: 'agent-send', id: 'a1' }, { action: 'agent-send', id: 'a1', text: '' },
+      { action: 'agent-send', id: 'a1', text: 'x'.repeat(4001) }, { action: 'agent-send', id: 'a1', text: `SECRET-MSG${ctl(7)}` },
+      { action: 'agent-send', id: 'a1', text: `SECRET-MSG${ctl(0x202e)}` }, { action: 'agent-send', id: 'a1', text: '--enter' },
+      { action: 'agent-send', id: 'a1', text: 5 }, { action: 'agent-send', id: '-a1', text: 'hi' }, { action: 'agent-send', id: ['a1'], text: 'hi' }]) {
+      s.clock.t += 1000;
+      const x = await s.req('POST', '/api/action', { body, token });
+      assert.equal(x.status, 400, JSON.stringify(body).slice(0, 80));
+      assert.match(x.json.why, /^refused: /);
+      assert.ok(!x.text.includes('SECRET-MSG'));
+    }
+    assert.equal(actionCalls(s.calls).length, 1, 'refusals ran nothing');
+    // a remote agent gets the longer timeout (a lookup on that computer first)
+    s.clock.t += 1000;
+    assert.equal((await s.req('POST', '/api/action', { body: { action: 'agent-send', id: 'remote:other:t-1:1', text: 'hi' }, token })).status, 200);
+    assert.equal(actionCalls(s.calls).at(-1).timeout, 40_000);
+    s.clock.t += 1000;
+    assert.equal((await s.req('POST', '/api/action', { body: { action: 'stop', id: 'remote:other:t-1:1' }, token })).status, 200);
+    assert.equal(actionCalls(s.calls).at(-1).timeout, 25_000);
+    // 6 messages a minute per device: two sent, four more pass, the seventh waits
+    for (let i = 0; i < 4; i++) {
+      s.clock.t += 1000;
+      assert.equal((await s.req('POST', '/api/action', { body: { action: 'agent-send', id: 'a1', text: 'ok' }, token })).status, 200);
+    }
+    s.clock.t += 1000;
+    const busy = await s.req('POST', '/api/action', { body: { action: 'agent-send', id: 'a1', text: 'ok' }, token });
+    assert.deepEqual([busy.status, busy.json.why], [429, 'Too many messages; wait a minute']);
+    s.clock.t += 60_000;
+    assert.equal((await s.req('POST', '/api/action', { body: { action: 'agent-send', id: 'a1', text: 'ok' }, token })).status, 200);
+    s.server.flushSeen();
+    for (const f of ['phone-log.jsonl', 'devices.json']) {
+      let text = '';
+      try {
+        text = readFileSync(join(s.home, f), 'utf8');
+      } catch {
+        // not written
+      }
+      assert.ok(!text.includes('SECRET-MSG'), f);
+    }
+  } finally {
+    await s.close();
+  }
+});
+
+test('k48 cliRunner: input goes to the child on stdin; without input stdin is closed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kadans-runner-'));
+  try {
+    const bin = join(dir, 'echo-stdin.mjs');
+    writeFileSync(bin, "let n = '';\nprocess.stdin.on('data', (c) => { n += c; });\nprocess.stdin.on('end', () => process.stdout.write(`${n.length}:${n === 'a\\nb' ? 'same' : 'other'}`));\n");
+    const run = cliRunner({ bin, env: { PATH: process.env.PATH } });
+    assert.equal((await run([], { input: 'a\nb' })).out, '3:same');
+    assert.equal((await run([])).out, '0:other');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

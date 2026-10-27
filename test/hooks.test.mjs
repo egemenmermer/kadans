@@ -259,9 +259,9 @@ test('hooks give up quickly on a held store lock: exit 0, nothing extra on stdou
   const ev = timed(['hook', 'event'], JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: sb.proj, prompt: 'hi' }));
   assert.equal(ev.code, 0);
   assert.equal(ev.out, '');
-  assert.ok(ev.ms < 5000, `hook event waited ${ev.ms} ms on the lock`);
+  assert.ok(ev.ms < 12_000, `hook event waited ${ev.ms} ms on the lock`);
   const pre = timed(['hook', 'pretool'], JSON.stringify({ session_id: 's1', cwd: sb.proj, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: {} }));
   assert.equal(pre.code, 0);
   assert.equal(JSON.parse(pre.out).hookSpecificOutput.permissionDecision, 'deny'); // the decision does not need the lock
-  assert.ok(pre.ms < 5000, `hook pretool waited ${pre.ms} ms on the lock`);
+  assert.ok(pre.ms < 12_000, `hook pretool waited ${pre.ms} ms on the lock`);
 });

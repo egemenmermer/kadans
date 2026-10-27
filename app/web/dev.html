@@ -38,6 +38,7 @@ body.shot .bar, body.shot #log { display: none; }
 <script src="fixtures/blobs.js"></script>
 <script src="fixtures/compact.js"></script>
 <script src="fixtures/stale.js"></script>
+<script src="fixtures/tell.js"></script>
 </head>
 <body>
 <div class="bar" id="bar"></div>
@@ -59,9 +60,11 @@ body.shot .bar, body.shot #log { display: none; }
       if (theme) r.dataset.theme = theme; else delete r.dataset.theme;
     }
   }
-  function fit() {
+  // Like the host: take the height the panel reports (it is capped at the frame's height, so measuring it can't grow it).
+  function fit(h) {
     const p = f.contentDocument.querySelector('.panel');
-    if (p) f.style.height = `${Math.ceil(p.getBoundingClientRect().height)}px`;
+    if (h > 0) f.style.height = `${Math.ceil(h)}px`;
+    else if (p) f.style.height = `${Math.ceil(p.getBoundingClientRect().height)}px`;
   }
   function show(name) {
     current = name;
@@ -86,7 +89,7 @@ body.shot .bar, body.shot #log { display: none; }
     // Stand-in for the WKWebView message handler: show what the panel sends; refit on size reports.
     f.contentWindow.webkit = { messageHandlers: { kadans: { postMessage(m) {
       log.textContent = `send ${JSON.stringify(m)}\n` + log.textContent.split('\n').slice(0, 7).join('\n');
-      if (m.action === 'size') fit();
+      if (m.action === 'size') fit(m.height);
       if (m.action === 'theme') { theme = m.theme; applyTheme(); drawBar(); }
     } } } };
     show(current);

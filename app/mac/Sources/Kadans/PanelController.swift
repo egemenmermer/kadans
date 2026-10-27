@@ -437,6 +437,42 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         }
     }
 
+    /// k48: an action on another computer's agent looks it up there first (two orca calls), then acts: a longer timeout.
+    static func actTimeout(_ id: String) -> TimeInterval { id.hasPrefix("remote:") ? 25 : 10 }
+
+    /// k48: a message for `agent send`, as lib/text.mjs messageText: CRLF and CR become LF, whitespace trimmed at both ends,
+    /// then 1 to 4000 unicode scalars (JS code points), no control character but newline (no tab), no bidi control,
+    /// U+2028/2029 or U+FEFF, and no "-" (orca would read it as a flag), "!" (shell mode), "/" (a slash command) or "#" (a
+    /// memory note) at the start (k49: as lib/text.mjs). nil otherwise; never says why.
+    static func messageText(_ v: Any?) -> String? {
+        guard let raw = v as? String, raw.utf16.count <= 4 * 4000 + 64 else { return nil }
+        let t = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !["-", "!", "/", "#"].contains(where: { t.hasPrefix($0) }), t.unicodeScalars.count <= 4000 else { return nil }
+        for u in t.unicodeScalars {
+            let c = u.value
+            if c == 0x0A { continue }
+            if c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x2028 || c == 0x2029 || (0x202A...0x202E).contains(c)
+                || (0x2066...0x2069).contains(c) || c == 0xFEFF { return nil }
+        }
+        return t
+    }
+
+    /// k48: like runThenRefresh, but the message goes to the CLI on stdin and nothing of it (nor the CLI's output) is logged.
+    private func sendThenRefresh(id: String, text: String) {
+        log("agent send")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = CLI.run(["agent", "send", id], stdin: Data(text.utf8), timeout: Self.actTimeout(id) + 15)
+            log("agent send: code \(r.code)\(r.timedOut ? " (timed out)" : "")")
+            let out = String(decoding: r.out, as: UTF8.self)
+            DispatchQueue.main.async {
+                let p = BridgeResult.payload(action: "agent-send", id: id, code: r.code, out: out, err: r.err, timedOut: r.timedOut)
+                if let js = BridgeResult.script(p) { self.evaluate(js) }
+                self.refresh(full: true)
+            }
+        }
+    }
+
     /// A config-set argument: a short string that cannot be read as a flag. The CLI does the real validation.
     static func configArg(_ v: Any?, pattern: String) -> String? {
         guard let s = v as? String, !s.isEmpty, s.count <= 64, !s.hasPrefix("-"),
@@ -497,11 +533,24 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         // task ids must be positive integers (JSON booleans rejected); argv only, never a shell; refresh afterwards.
         case "stop":
             guard let id = agentId(body["id"]) else { log("ignored stop: id is not in the current agents list"); return }
-            runThenRefresh(["agent", "stop", id], result: ("stop", id))
+            runThenRefresh(["agent", "stop", id], timeout: Self.actTimeout(id), result: ("stop", id))
         case "compact":
             // Types /compact into that chat's Orca terminal; the CLI refuses anything but an idle chat in a known terminal.
             guard let id = agentId(body["id"]) else { log("ignored compact: id is not in the current agents list"); return }
-            runThenRefresh(["agent", "compact", id], result: ("compact", id))
+            runThenRefresh(["agent", "compact", id], timeout: Self.actTimeout(id), result: ("compact", id))
+        case "agent-send":
+            // k48: types a message into that agent's terminal (`kadans agent send <id>`): the text goes on stdin only,
+            // checked as lib/text.mjs messageText checks it, and is never logged (sendThenRefresh logs the exit code only).
+            guard let id = agentId(body["id"]), let text = Self.messageText(body["text"]) else {
+                log("ignored agent-send: id is not in the current agents list or the text is not 1 to 4000 printable characters")
+                // k49: the composer waits for an answer: a fixed refusal (never the text) so it does not say "Sending…" on.
+                if let raw = body["id"] as? String, raw.count <= 200,
+                   let js = BridgeResult.script(["action": "agent-send", "id": raw, "ok": false, "why": "not sent: that chat or message was not accepted"]) {
+                    evaluate(js)
+                }
+                return
+            }
+            sendThenRefresh(id: id, text: text)
         case "approve":
             guard let task = Self.taskId(body["id"]) else { log("ignored approve: id is not a task number"); return }
             runThenRefresh(["approve", String(task)])

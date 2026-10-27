@@ -1,4 +1,9 @@
-# Kadans
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.png">
+    <img src="docs/images/wordmark.png" width="235" alt="Kadans">
+  </picture>
+</h1>
 
 A speedometer for your Claude Code usage limits, in the macOS menu bar. (*Kadans* is Turkish for cadence: the steady
 rhythm a cyclist keeps.)

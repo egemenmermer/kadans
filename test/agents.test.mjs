@@ -476,7 +476,7 @@ function cliSandbox() {
   const fake = join(root, 'fake-orca.sh');
   writeFileSync(fake, `#!/bin/sh\necho "$*" >> "${log}"\ncase "$1 $2" in\n  "worktree ps") cat "${join(root, 'ps.json')}" ;;\n  "terminal list") cat "${join(root, 'tl.json')}" ;;\n  "terminal close") echo '{"ok":true}' ;;\n  *) exit 3 ;;\nesac\n`);
   chmodSync(fake, 0o755);
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake };
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
   return { root, home, proj, log, env };
 }
 

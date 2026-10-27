@@ -62,13 +62,13 @@ test('private files: a new home is created 0700 even under umask 022; writeAtomi
 });
 
 // A child that holds the lock for holdMs after waiting startMs; logs enter/exit times to a file.
-function holder({ home, name, startMs, holdMs, staleMs }) {
+function holder({ home, name, startMs, holdMs, staleMs, epoch }) {
   const code = `
     import { appendFileSync } from 'node:fs';
     import { withLock } from ${JSON.stringify(new URL('../lib/store.mjs', import.meta.url).href)};
-    const [home, name, startMs, holdMs, staleMs] = process.argv.slice(1);
+    const [home, name, startMs, holdMs, staleMs, epoch] = process.argv.slice(1);
     const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-    nap(Number(startMs));
+    nap(Math.max(0, Number(epoch) + Number(startMs) - Date.now())); // start relative to a shared epoch, so a slow process start does not skew the schedule
     let enter = 0;
     try {
       withLock(home, () => {
@@ -82,7 +82,7 @@ function holder({ home, name, startMs, holdMs, staleMs }) {
     }
   `;
   return new Promise((res) => {
-    const p = spawn(process.execPath, ['--input-type=module', '-e', code, home, name, startMs, holdMs, staleMs], { stdio: 'ignore' });
+    const p = spawn(process.execPath, ['--input-type=module', '-e', code, home, name, startMs, holdMs, staleMs, epoch], { stdio: 'ignore' });
     p.on('close', (c) => res(c));
   });
 }
@@ -90,12 +90,13 @@ function holder({ home, name, startMs, holdMs, staleMs }) {
 test('lock: a slow holder that was taken over does not delete the new holder lock (three-writer race)', async () => {
   const home = tmp();
   const staleMs = 500;
+  const epoch = Date.now() + 3000; // children are up and waiting by then, even on a loaded machine
   // A holds 800 ms (stale after 500): B takes over at ~500 and holds 350 ms; A releases at ~800 while B is inside;
   // C starts at 820 and must wait for B. Before the fix A's release removed B's lock and C got in at once.
   const [a, b, c] = await Promise.all([
-    holder({ home, name: 'A', startMs: 0, holdMs: 800, staleMs }),
-    holder({ home, name: 'B', startMs: 50, holdMs: 350, staleMs }),
-    holder({ home, name: 'C', startMs: 820, holdMs: 100, staleMs }),
+    holder({ home, name: 'A', startMs: 0, holdMs: 800, staleMs, epoch }),
+    holder({ home, name: 'B', startMs: 50, holdMs: 350, staleMs, epoch }),
+    holder({ home, name: 'C', startMs: 820, holdMs: 100, staleMs, epoch }),
   ]);
   assert.equal(b, 0);
   assert.equal(c, 0);

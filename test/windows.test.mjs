@@ -187,7 +187,7 @@ test('kadans connect (real CLI, fake orca): prints the code once with the hint a
   const fake = join(root, 'fake-orca');
   writeFileSync(fake, `#!/usr/bin/env node\nconsole.log('argv ' + process.argv.slice(2).join(' '));\nconsole.log('Orca server ready');\nconsole.log('Web client URL: http://127.0.0.1:1/#${CODE}');\nconsole.log('Pairing URL: ${CODE}');\n`);
   chmodSync(fake, 0o755);
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake };
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
   const r = spawnSync(process.execPath, [BIN, 'connect', '--name', 'other'], { env, encoding: 'utf8', timeout: 15000 });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /argv serve\n/); // the name is never passed to orca

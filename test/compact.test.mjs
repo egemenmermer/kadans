@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COMPACT_DEFAULTS, DRAFT_REFUSAL, compactAdvice, compactPlan, contextOf, contextWindow, draftGuard, inputBoxState, screenReadArgv } from '../lib/compact.mjs';
-import { appendEvent, compactAgent, lastContext, renderAgents, scanTranscript } from '../lib/agents.mjs';
+import { appendEvent, compactAgent, lastContext, renderAgents, scanTranscript, sendAgent } from '../lib/agents.mjs';
+import { messageText } from '../lib/text.mjs';
 import { appendSample, sampleFromPayload } from '../lib/samples.mjs';
 import { loadConfig } from '../lib/pace.mjs';
 import { parseSetting } from '../lib/config.mjs';
@@ -307,7 +308,7 @@ function cliSandbox({ state = 'done', tail = EMPTY } = {}) {
   const fake = join(root, 'fake-orca.sh');
   writeFileSync(fake, `#!/bin/sh\necho "$*" >> "${log}"\ncase "$1 $2" in\n  "worktree ps") cat "${join(root, 'ps.json')}" ;;\n  "terminal list") cat "${join(root, 'tl.json')}" ;;\n  "terminal read") cat "${join(root, 'screen.json')}" ;;\n  "terminal send") echo '{"ok":true}' ;;\n  *) exit 3 ;;\nesac\n`);
   chmodSync(fake, 0o755);
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake };
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
   return { root, home, log, env };
 }
 
@@ -437,4 +438,80 @@ test('cli: after a compact_boundary the row shows the smaller context and no com
   writeFileSync(t, readFileSync(t, 'utf8') + jsonl([boundary({ pre: 150_002, post: 18_500, at: now - 2 * MIN })]));
   const [a] = JSON.parse(cli(sb.env, ['agents', '--json']).out);
   assert.deepEqual(a.context, { tokens: 18_500, window: 200_000, pct: 9.3, advice: 'none', why: null });
+});
+
+// ---------- k48: agent send ----------
+const ch = (n) => String.fromCodePoint(n);
+const MSG = 'SECRET-MSG ship the fix once the tests pass';
+
+test('k48 send: messageText keeps 1 to 4000 printable characters plus newlines; refuses control, bidi, separators and a leading "-"', () => {
+  for (const t of ['!rm -rf ~', '  !ls', '/clear', '/compact', '#remember this', '-x']) assert.equal(messageText(t), null, t);
+  assert.equal(messageText('be careful with /tmp and #3!'), 'be careful with /tmp and #3!');
+  assert.equal(messageText('  hello\r\nworld\r\n'), 'hello\nworld');
+  assert.equal(messageText('ünïcödé 🚀\n\nnext'), 'ünïcödé 🚀\n\nnext');
+  assert.equal(messageText('x'.repeat(4000)), 'x'.repeat(4000));
+  assert.equal([...messageText('🚀'.repeat(4000))].length, 4000);
+  for (const bad of ['', '  \n ', 'x'.repeat(4001), '🚀'.repeat(4001), `a${ch(9)}b`, `a${ch(0x1b)}[31mb`, `a${ch(7)}`, `a${ch(0)}b`, `a${ch(0x9b)}b`,
+    `a${ch(0x202e)}b`, `a${ch(0x2066)}b`, `a${ch(0x2028)}b`, `a${ch(0xfeff)}b`, '--enter', '-x', ' -x', null, 5, {}, ['x']]) {
+    assert.equal(messageText(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('k48 send: types the message plus Enter only after the draft guard; refusals are fixed and never repeat the text', () => {
+  const calls = [];
+  const run = (argv) => { calls.push(argv); return argv[1] === 'read' ? screen(EMPTY) : '{"ok":true}'; };
+  const r = sendAgent(idleRow, MSG, { run });
+  assert.equal(r.ok, true, r.why);
+  assert.deepEqual(calls, [READ, ['terminal', 'send', '--terminal', 'term_A', '--text', MSG, '--enter']]);
+  assert.ok(!r.how.includes(MSG));
+  for (const [tail, why] of [[TYPED, /unsent text/], [MULTI, /unsent text/], [DIALOG, /dialog/], [[], /could not be read/]]) {
+    const c = [];
+    const x = sendAgent(idleRow, MSG, { run: (argv) => { c.push(argv); return screen(tail); } });
+    assert.equal(x.ok, false);
+    assert.match(x.why, why);
+    assert.deepEqual(c, [READ]); // read only: nothing typed
+  }
+  // orcaRunner's error repeats the whole argv (the text too): the refusal never passes it on
+  const fails = sendAgent(idleRow, MSG, { run: (argv) => { if (argv[1] === 'send') throw new Error(`orca ${argv.join(' ')} failed`); return screen(EMPTY); } });
+  assert.deepEqual(fails, { ok: false, why: 'Orca did not take the message' });
+  // k49: a working chat is no longer refused here (the send guard decides on its screen; test/tell.test.mjs)
+  for (const row of [{ ...idleRow, status: 'needs-you' }, { ...idleRow, status: 'ended' }, { ...idleRow, orca: null },
+    { ...idleRow, orca: { ...idleRow.orca, ambiguous: true } }, { ...idleRow, id: 'remote:other:t:1', machine: 'other', orca: { terminal: null } }]) {
+    const c = [];
+    const x = sendAgent(row, MSG, { run: (argv) => { c.push(argv); return screen(EMPTY); } });
+    assert.equal(x.ok, false);
+    assert.deepEqual(c, []);
+  }
+  assert.equal(sendAgent(idleRow, MSG, { run: null }).ok, false);
+  const dry = [];
+  assert.equal(sendAgent(idleRow, MSG, { run: (a) => dry.push(a), dryRun: true }).ok, true);
+  assert.deepEqual(dry, []);
+});
+
+test('k48 cli: agent send takes the text on stdin only, types it once, never echoes it; bad text, an argument or a draft send nothing', () => {
+  const sb = cliSandbox();
+  const send = (args, input, env = sb.env) => {
+    const r = spawnSync(process.execPath, [BIN, 'agent', 'send', ...args], { env, encoding: 'utf8', input, timeout: 15000 });
+    return { code: r.status, out: r.stdout, err: r.stderr };
+  };
+  const dry = send(['s1', '--dry-run'], MSG);
+  assert.equal(dry.code, 0, dry.err);
+  assert.deepEqual(sends(sb.log), []);
+  const ok = send(['s1'], `${MSG}\n`);
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /^s1: sent the message to Orca terminal term_A$/m);
+  assert.ok(!(ok.out + ok.err).includes('SECRET-MSG'));
+  assert.deepEqual(sends(sb.log), [`terminal send --terminal term_A --text ${MSG} --enter`]);
+  for (const [args, input] of [[['s1'], `SECRET-MSG${ch(7)}`], [['s1'], ''], [['s1'], 'x'.repeat(4001)], [['s1', 'SECRET-MSG'], 'hi'], [[], 'SECRET-MSG']]) {
+    const r = send(args, input);
+    assert.equal(r.code, 2, JSON.stringify(args));
+    assert.ok(!(r.out + r.err).includes('SECRET-MSG'), r.err);
+  }
+  assert.equal(sends(sb.log).length, 1, 'refusals typed nothing');
+  const draft = cliSandbox({ tail: TYPED });
+  const d = send(['s1'], MSG, draft.env);
+  assert.equal(d.code, 2);
+  assert.match(d.err, /unsent text: nothing was sent/);
+  assert.ok(!d.err.includes('SECRET-MSG'));
+  assert.deepEqual(sends(draft.log), []);
 });

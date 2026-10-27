@@ -269,7 +269,7 @@ function cliWorld() {
   writeFileSync(fake, `#!/bin/sh\necho "$*" >> "${log}"\nexit 3\n`);
   chmodSync(fake, 0o755);
   // CLAUDE_CONFIG_DIR points at another profile: gas tick must ignore it and use the own ~/.claude
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'other-profile'), KADANS_ORCA_BIN: fake };
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'other-profile'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
   const cli = (args) => spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 15000 });
   return { root, home, own: accountKey(claude), log, cli };
 }

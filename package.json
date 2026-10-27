@@ -13,6 +13,7 @@
     "!app/web/fixtures/",
     "app/mac/Package.swift",
     "app/mac/Sources/",
+    "app/mac/Kadans.icns",
     "scripts/build-app.sh",
     "LICENSE",
     "README.md",

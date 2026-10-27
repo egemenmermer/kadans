@@ -19,9 +19,10 @@ import { kadansCommand, plan } from '../lib/install.mjs';
 import { chainTarget, joinLines, runChained, savedStatusLine, shortCommand, userCommand } from '../lib/chain.mjs';
 import { NO_TOOLCHAIN, WIN_APP_LINE, appRoot, applySetup, appsDir, currentBin, hasToolchain, installedVersion, isNpxCache, packageVersion, stableBin, versionCmp } from '../lib/setup.mjs';
 import { configView, setSetting } from '../lib/config.mjs';
-import { remoteCaller } from '../lib/remote.mjs';
+import { isRemoteId, refreshRemote, remoteCaller, remoteCompact, remoteSend, remoteStop, triggerRemote } from '../lib/remote.mjs';
+import { SEND_MAX, messageText } from '../lib/text.mjs';
 import { ERR as COMPUTER_ERR, addComputer, listComputers, readStdin, removeComputer } from '../lib/computers.mjs';
-import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, readCache, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
+import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, readCache, renderAgents, runEvent, sendAgent, stopAgent } from '../lib/agents.mjs';
 import { refresh as refreshTitles, triggerRefresh } from '../lib/smart-titles.mjs';
 import { setTitle } from '../lib/titles.mjs';
 import { ORDER_MAX, setOrder } from '../lib/order.mjs';
@@ -68,6 +69,10 @@ Usage:
   kadans agent compact <id> [--dry-run]   type /compact into an idle chat's Orca terminal (orca terminal send);
                       refused for working, waiting or ended chats, a chat with unsent text in its input line, and
                       outside Orca (type /compact there yourself)
+  kadans agent send <id> [--dry-run] < message   type the message (stdin only, up to 4000 characters) plus Enter
+                      into an idle chat's Orca terminal; the same refusals as compact. Never logged or stored
+                      Stop, compact and send also take another computer's id (remote:<computer>:...): Kadans looks the
+                      agent up on that computer again and acts there through Orca (--environment)
   kadans agent title <id> "<text>"   set the agent's title ("" clears it)
   kadans agent order <id> [<id> ...]   show these agents first, in this order (ended ones drop out)
   kadans agent replace <agentId> <taskId> [--dry-run]   stop the agent, then task start
@@ -555,14 +560,54 @@ async function agentsCmd(args, env) {
   }
   // Smart titles (lib/smart-titles.mjs): a detached `kadans titles refresh`, at most once a minute, never waited for.
   const trigger = () => triggerRefresh(home, { env, cfg: loadConfig(home) });
-  const agents = await listAgentsAsync(home, { ...opts, trigger, remote: remoteCaller(env) }); // --brief stays local
+  // k48: other computers' agents come from the cache; a detached `kadans remote refresh` updates it when due.
+  const remote = remoteCaller(env) ? (now) => triggerRemote(home, { env, now }) : null;
+  const agents = await listAgentsAsync(home, { ...opts, trigger, remote }); // --brief stays local
   process.stdout.write(flags.json ? `${JSON.stringify(agents, null, 2)}\n` : renderAgents(agents, Date.now(), { all }));
+  return 0;
+}
+
+// k48: stop / compact / send on another computer's agent (`remote:<machine>:<paneKey>`, exact ids only): a fresh lookup on
+// that machine through lib/remote.mjs, never the local list or pane map.
+async function remoteAgentCmd(sub, id, home, env, { dryRun = false, text = null } = {}) {
+  const call = remoteCaller(env);
+  const r = sub === 'stop' ? await remoteStop(home, id, { call, dryRun })
+    : sub === 'compact' ? await remoteCompact(home, id, { call, dryRun })
+      : await remoteSend(home, id, text, { call, dryRun });
+  const verb = { stop: 'stopped', compact: 'compacted', send: 'sent' }[sub];
+  if (!r.ok) return fail(`not ${verb}: ${r.why}`);
+  process.stdout.write(`${dryRun ? 'dry run: nothing changed\n' : ''}${id}: ${r.how}\n`);
+  return 0;
+}
+
+const SEND_USAGE = 'usage: kadans agent send <id> [--dry-run] (the message comes on stdin)';
+const SEND_BAD_TEXT = `not sent: the message must be 1 to ${SEND_MAX} printable characters (newlines allowed), not starting with "-"`;
+
+// `kadans agent send <id>`: the message on stdin only (never an argument: argv shows in `ps` and shell history), typed into
+// the agent's terminal followed by Enter. Never logged or stored; errors are fixed sentences that never repeat the text.
+async function agentSendCmd(pos, flags, env) {
+  if (pos.length !== 1) return fail(SEND_USAGE);
+  const text = messageText(readStdin(0, process.stdin.isTTY, 4 * SEND_MAX + 64));
+  if (text === null) return fail(SEND_BAD_TEXT);
+  const home = kadansHome(env);
+  const dryRun = Boolean(flags['dry-run']);
+  if (isRemoteId(pos[0])) return remoteAgentCmd('send', pos[0], home, env, { dryRun, text });
+  const run = orcaRunner(env);
+  const { agent, why } = findAgent(listAgents(home, { run, all: true, claudeDirs: [configDir(env)] }), pos[0]);
+  if (!agent) return fail(`not sent: ${why}`);
+  const r = sendAgent(agent, text, { run, dryRun });
+  if (!r.ok) return fail(`not sent: ${r.why}`);
+  process.stdout.write(`${dryRun ? 'dry run: nothing sent\n' : ''}${agent.id}: ${r.how}\n`);
   return 0;
 }
 
 function agentCmd(sub, args, env) {
   const { pos, flags } = parseArgs(args);
   const home = kadansHome(env);
+  if (sub === 'send') return agentSendCmd(pos, flags, env).catch(() => fail('not sent: something went wrong; nothing was logged'));
+  if ((sub === 'stop' || sub === 'compact') && isRemoteId(pos[0])) {
+    return remoteAgentCmd(sub, pos[0], home, env, { dryRun: Boolean(flags['dry-run']) }).catch(() => fail(`not done: ${sub} on another computer failed`));
+  }
   if (sub === 'title') {
     if (pos.length < 1) return fail('usage: kadans agent title <id> "<text>"');
     const { agent, why } = findAgent(listAgents(home, { run: orcaRunner(env), all: true, claudeDirs: [configDir(env)] }), pos[0]);
@@ -618,7 +663,7 @@ ${agent.id}: ${r.how}
 `);
     return 0;
   }
-  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|order|replace|pace|compact <id> ...');
+  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|order|replace|pace|compact|send <id> ...');
   const run = orcaRunner(env);
   const { agent, why } = findAgent(listAgents(kadansHome(env), { run, claudeDirs: [configDir(env)] }), pos[0]);
   if (!agent) return fail(why);
@@ -1033,6 +1078,8 @@ function main(argv, env = process.env) {
     if (cmd === 'devices') return devicesCmd(argv.slice(1), env);
     if (cmd === 'connect') return runConnect(argv.slice(1), { env });
     if (cmd === 'computers') return computersCmd(argv.slice(1), env).catch(() => fail(COMPUTER_ERR.list));
+    // k48, internal: the detached refresher lib/remote.mjs triggerRemote starts. Prints nothing.
+    if (cmd === 'remote' && argv[1] === 'refresh' && argv.length === 2) return refreshRemote(kadansHome(env), { call: remoteCaller(env) }).then(() => 0, () => 1);
   } catch (e) {
     return fail(e.message);
   }

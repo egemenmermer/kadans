@@ -129,6 +129,7 @@
   const shapeFor = (id) => shapeMap.get(String(id)) ?? shapeOf(id);
 
   const IC = {
+    tell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 3h9.6c.7 0 1.2.5 1.2 1.2v5.6c0 .7-.5 1.2-1.2 1.2H8.4L5.2 13.6V11h-2c-.7 0-1.2-.5-1.2-1.2V4.2C2 3.5 2.5 3 3.2 3z"/></svg>',
     pace: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 11a5 5 0 1 1 10 0"/><path d="M8 11 5.8 8"/></svg>',
     play: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 4v8l6.5-4z"/></svg>',
     swap: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 5.5h9L10 3M12.5 10.5h-9L6 13"/></svg>',
@@ -170,7 +171,10 @@
     // k32: rename = the chat whose title is being edited { id, start }; titles = renames sent, shown until the data
     // agrees { title, prev, at }; order = the owner's new order of the live rows { ids, at }, shown until the data
     // agrees; liveIds = the live rows in the order last drawn.
-    rename: null, titles: new Map(), order: null, liveIds: [], awayTitles: new Map() };
+    rename: null, titles: new Map(), order: null, liveIds: [], awayTitles: new Map(),
+    // k49: tell = the open composer { id, title, short, machine, n (characters), why (hint key) }: never the text, which
+    // lives only in the textarea; telling = a message sent and not answered yet { id, at }.
+    tell: null, telling: null };
 
   // ---------- motion (k9a, k14) ----------
   // Calm and short: 120-260 ms, transform and opacity only. Nothing moves on the first paint, in the 300 ms after it
@@ -593,8 +597,11 @@
   const hintsOff = () => Number(cfgVal('compact.soonPct')) >= COMPACT_OFF;
   const adviceOf = (a) => (hintsOff() ? 'none' : a.context?.advice === 'now' || a.context?.advice === 'soon' ? a.context.advice : 'none');
   const compactInFlight = () => Boolean(view.compact && !view.compact.failedAt);
-  const canCompact = (a) => rowState(a) === 'idle' && a.source === 'claude' && !String(a.id).startsWith('orca:') && orcaOk(a) &&
-    adviceOf(a) !== 'none' && finite(a.context?.tokens);
+  const canCompact = (a) => (a.machine ? remoteCan(a, 'canCompact') && rowState(a) === 'idle'
+    : rowState(a) === 'idle' && a.source === 'claude' && !String(a.id).startsWith('orca:') && orcaOk(a) && adviceOf(a) !== 'none' && finite(a.context?.tokens));
+  // k48: another computer's agent carries its own flags (lib/remote.mjs: a terminal handle on that machine is known); none
+  // while its machine is stale or offline.
+  const remoteCan = (a, flag) => a[flag] === true && a.machineStale !== true && a.machineOffline !== true;
   const offerCompact = (a) => canCompact(a) && !compactInFlight();
   const findAgent = (id) => agentList(view.data?.agents).find((a) => a && String(a.id) === String(id)) ?? null;
 
@@ -639,10 +646,19 @@
   // first line of the CLI's message, text only); the rest is read from the next refresh, as before.
   function actionResult(r) {
     if (r && typeof r === 'object' && (r.action === 'computers-add' || r.action === 'computers-remove')) return compResult(r); // k41
+    if (r && typeof r === 'object' && r.action === 'agent-send' && r.id != null) return tellResult(r); // k49: fixed lines only
     // k32: a refused reorder drops the local order (the rows go back to the served order); a refused rename drops the
     // name shown early and says why on the row.
     if (r && typeof r === 'object' && r.ok !== true && r.action === 'reorder') {
       view.order = null;
+      render({});
+      return;
+    }
+    // k48: another computer's chat has no context size to watch: its compact is settled by the CLI's answer.
+    if (r && typeof r === 'object' && r.ok === true && r.action === 'compact' && view.compact && String(view.compact.id) === String(r.id) &&
+      findAgent(r.id)?.machine) {
+      view.compact = null;
+      setResult(r.id, true, 'Sent /compact');
       render({});
       return;
     }
@@ -660,7 +676,8 @@
     const a = findAgent(id);
     // Checked again at the click: the chat may have started working since the confirm opened.
     if (!a || !offerCompact(a)) return;
-    view.compact = { id: a.id, tokens: a.context.tokens, at: Date.now(), failedAt: null };
+    // k48: a remote row has no context size; the compact settles when the CLI answers (a refusal) or after COMPACT_WAIT_MS.
+    view.compact = { id: a.id, tokens: finite(a.context?.tokens) ? a.context.tokens : null, at: Date.now(), failedAt: null };
     send({ action: 'compact', id: a.id });
     setTimeout(() => render({}), COMPACT_WAIT_MS + 50);
   }
@@ -676,7 +693,7 @@
         `<button class="pill" data-do="cancel" data-id="${esc(id)}">Cancel</button></div>`;
     }
     if (st === 'ended') return `<div class="acts">${btn('dismiss', id, IC.x, 'Dismiss')}</div>`;
-    if (a.machine) return '<div class="acts"></div>'; // k38: an agent on another computer: shown, never acted on
+    if (a.machine) return remoteActs(a, st, id); // k48: another computer's agent: close/stop and compact where its flags allow
     let first;
     // Only Claude sessions on this Mac carry Kadans hooks; Orca-only rows have no session id to pace.
     const canPace = a.source !== 'orca' && !String(id).startsWith('orca:');
@@ -693,8 +710,22 @@
     const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
     // k32: on a phone (no double-click) the row's tap actions start with Rename.
     const ren = touchUi() ? btn('rename', id, IC.pen, 'Rename') : '';
-    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${ren}${first}` +
+    const tell = canTell(a) ? btn('tell', id, IC.tell, 'Tell') : ''; // k49
+    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${ren}${tell}${first}` +
       `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${comp}${last}</div>`;
+  }
+
+  // k48: the actions of another computer's agent. Close (idle) or Stop when its terminal there is known, Compact for an
+  // idle Claude chat, Tell (k49) for an idle or working one; never pace, replace, rename or open (this computer only).
+  function remoteActs(a, st, id) {
+    const stop = remoteCan(a, 'canStop');
+    const last = st === 'idle'
+      ? btn('close', id, IC.x, 'Close chat', { disabled: !stop, why: "Can't close from here" })
+      : btn('confirm', id, IC.stop, 'Stop', { disabled: !stop, why: "Can't stop from here" });
+    const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
+    const tell = canTell(a) ? btn('tell', id, IC.tell, 'Tell') : ''; // k49: when its flags allow send
+    if (!stop && !comp && !tell) return '<div class="acts"></div>'; // nothing it can do there: no disabled buttons either (k38)
+    return `<div class="acts">${tell}${comp}${last}</div>`;
   }
 
   function pickerHtml(a, tasks) {
@@ -768,7 +799,9 @@
       const cs = !askC && view.compact && String(view.compact.id) === String(a.id) ? view.compact : null;
       if (cs && !cs.failedAt) [pre, preText] = ['Compacting… · ', 'Compacting. '];
       const rs = !askC && !ask && !swap ? resultFor(a.id) : null;
-      if (rs?.ok) [pre, preText] = ['Compacted · ', 'Compacted. '];
+      if (rs?.ok) [pre, preText] = [`${esc(rs.why || 'Compacted')} · `, `${rs.why || 'Compacted'}. `]; // k48: 'Sent /compact' on a remote row
+      const tl = !askC && !ask && !swap && !rs && view.telling && String(view.telling.id) === String(a.id); // k49: a message on its way
+      if (tl) [pre, preText] = ['Sending… · ', 'Sending. '];
       if (cs?.failedAt) {
         const note = 'Kadans saw no smaller context within 90 s. If it did not compact, type /compact in that chat.';
         [pre, preText] = [`<span class="warn" title="${esc(note)}">Compact not confirmed</span> · `, `Compact not confirmed: ${note} `];
@@ -787,7 +820,7 @@
       // (and progress), except on an idle row, whose lead already says how long ("Idle 7 min").
       const age = st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt);
       const rm = a.machine && !quiet ? remoteMeta(st, a, now) : null;
-      if (rm) [pre, preText] = [rm.pre, rm.preText];
+      if (rm && !ask && !askC && !swap && !cs && !rs && !tl) [pre, preText] = [rm.pre, rm.preText]; // k48: a confirm or result wins
       const segs = rm ? rm.segs : [['du', st === 'idle' ? null : age], ['cx', tagOn ? null : ctx], ['pj', a.project],
         ['fm', st === 'ended' ? null : family(a.model)], ['du', st === 'idle' ? age : null]].filter(([, t]) => t).map(([c, t]) => [c, String(t)]);
       let line = quiet ? '' : segs.map(([, t]) => t).join(' · ');
@@ -810,6 +843,7 @@
         items.push({ key: `why:${a.id}`, html: `<div class="cwhy" data-key="why:${esc(a.id)}"><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>` });
       }
       if (view.picker === a.id) items.push({ key: `menu:pick:${a.id}`, html: pickerHtml(a, tasks) });
+      if (view.tell && String(view.tell.id) === String(a.id) && !tellSheet()) items.push(tellItem(view.tell)); // k49: inline on the Mac
       if (view.pacer === a.id) {
         const st0 = view.data?.status;
         const slowS = finite(st0?.pace?.slowSeconds) ? st0.pace.slowSeconds : 20;
@@ -1480,6 +1514,13 @@
     if (view.pacer && !all.some((a) => a.id === view.pacer && ['working', 'idle'].includes(rowState(a)))) view.pacer = null;
     if (!old.length) view.closeAll = false;
     if (view.tapKey && !all.some((a) => `row:${a.id}` === view.tapKey)) view.tapKey = null;
+    // k49: the chat left the list (or ended): its composer closes, and what was typed goes with it
+    if (view.tell && !all.some((a) => String(a.id) === String(view.tell.id) && rowState(a) !== 'ended')) {
+      const f = tellField();
+      if (f) f.value = '';
+      view.tell = null;
+      tellViewport(false);
+    }
     const subs = (a, rank) => (rowState(a) === 'ended' || !Array.isArray(a.subagents) ? []
       : a.subagents.filter((x) => x && x.status === 'running').map((x) => ({ id: x.id, startedAt: x.startedAt, rank })));
     shapeMap = assignShapes([...live.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 0 })), ...live.flatMap((a) => subs(a, 1)),
@@ -1516,6 +1557,7 @@
       blocks.push(list);
     }
     blocks.push(bottom(status, g.mode));
+    if (view.tell && tellSheet()) blocks.push(tellItem(view.tell)); // k49: the phone's bottom sheet
     // k27 phone: pairing / pair again replace the panel; "can't reach your Mac" sits above the last reading.
     const pc = phoneCard();
     if (pc && net.state !== 'offline' && net.state !== 'off') blocks.splice(0, blocks.length, pc);
@@ -1874,7 +1916,11 @@
     const now = view.sizeNow === true;
     view.sizeNow = false;
     const p = root().firstElementChild;
-    const h = p ? Math.ceil(p.getBoundingClientRect().height) : 0;
+    // The height the panel wants (its scroll area fully open, up to the cap), not what fits the window now: the panel is
+    // capped at the window's height in CSS, so a window that lags behind would otherwise never grow.
+    const sc = p?.querySelector?.('#k-list, #k-sbody');
+    const want = p ? p.getBoundingClientRect().height + (sc ? Math.max(0, sc.scrollHeight - sc.clientHeight) : 0) : 0;
+    const h = Math.ceil(document.documentElement.dataset.shell === 'phone' ? want : Math.min(want, view.cap ?? 560));
     if (!h || h === view.height) return;
     const wait = view.animUntil - Date.now();
     if (h < view.height && wait > 0 && !now) {
@@ -1942,6 +1988,181 @@
     if (touchUi() || view.screen !== 'main' || drag.phase || !e.target?.closest?.('.nm')) return;
     const key = e.target.closest('.row[data-key]')?.getAttribute('data-key') ?? '';
     if (key.startsWith('row:')) startRename(key.slice(4));
+  }
+
+  // ---------- tell (k49) ----------
+  // Tell on a row opens a composer: inline under the row on the Mac, a bottom sheet above the keyboard on the phone page
+  // and in the iPhone app. Cmd-Enter or Send sends one `agent-send {id, text}`; Esc or Cancel closes it. The text lives
+  // only in the textarea: never in `view`, never in localStorage, never logged. It is cleared on send and on cancel, and
+  // no draft is kept when the panel closes (visible(false) and reset() drop it). The composer's markup is built from what
+  // was known when it opened (title, machine), so a refresh never rebuilds the textarea (what was typed and the caret stay).
+  // Results are fixed lines (TELL_LINES), never the CLI's text, so a refusal can never echo the message.
+  const TELL_MAX = 4000; // lib/text.mjs SEND_MAX
+  const TELL_NEAR = 3600; // the counter shows from here
+  const TELL_WAIT_MS = 60_000; // no answer by then: the row stops saying "Sending…"
+  const TELL_STATES = new Set(['idle', 'working', 'slowed', 'paused']);
+  // As lib/text.mjs messageText checks it (tabs become two spaces first, so a pasted indent is not a refusal).
+  const TELL_BAD = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/u;
+  const TELL_HINT = {
+    lead: 'Messages can’t start with !, / or #',
+    dash: 'Messages can’t start with -',
+    bad: 'This has characters Kadans can’t type',
+    long: `Too long: ${TELL_MAX} characters at most`,
+  };
+  // The answer's reason -> one fixed line. Order matters (the first match wins); anything else is "Not sent".
+  const TELL_LINES = [
+    [/unsent text/i, 'That chat has unsent text. Nothing was sent.'],
+    [/question or permission/i, 'It’s waiting on a question. Answer it first.'],
+    [/dialog|screen could not be read/i, 'That chat shows a dialog, or Kadans couldn’t read it. Nothing was sent.'],
+    [/is working/i, 'It’s working. Try again when it waits.'],
+    [/Too many messages/i, 'Too many messages; wait a minute'],
+    [/Too many actions/i, 'Too many actions at once; try again'],
+    [/took too long/i, 'No answer in time. Check that chat before sending again.'],
+    [/reach your Mac/i, 'Couldn’t reach your Mac. Check that chat before sending again.'],
+    [/did not answer|not live|offline/i, 'That computer didn’t answer. Nothing was sent.'],
+    [/no longer running|has ended|not in the current|not an agent/i, 'That chat is gone. Nothing was sent.'],
+    [/did not take/i, 'Orca didn’t take the message.'],
+  ];
+  const tellLine = (why) => (TELL_LINES.find(([re]) => re.test(String(why ?? ''))) ?? [null, 'Not sent.'])[1];
+  function tellCheck(v) {
+    const t = String(v ?? '').replace(/\t/g, '  ').replace(/\r\n?/g, '\n').replace(/^\s+|\s+$/gu, '');
+    const n = Array.from(t).length;
+    const why = !t ? 'empty' : /^[!/#]/.test(t) ? 'lead' : /^-/.test(t) ? 'dash' : n > TELL_MAX ? 'long' : TELL_BAD.test(t) ? 'bad' : null;
+    return why ? { ok: false, n, why } : { ok: true, n, text: t };
+  }
+  // A local chat in a known Orca terminal that is idle or working (also slowed or paused), or another computer's chat
+  // whose flags allow send. The CLI decides again on the chat's screen (lib/compact.mjs sendGuard).
+  const canTell = (a) => (a.machine ? remoteCan(a, 'canSend') && (rowState(a) === 'idle' || rowState(a) === 'working')
+    : TELL_STATES.has(rowState(a)) && orcaOk(a));
+  const tellSheet = () => document.documentElement.dataset.shell === 'phone';
+  function tellField(it = view.tree) {
+    if (!it) return null;
+    if (it.tellField) return it.node ?? null;
+    for (const k of it.kids ?? []) { const n = tellField(k); if (n) return n; }
+    return null;
+  }
+  function shortTitle(t) {
+    if (t.length <= 24) return t;
+    const cut = t.slice(0, 24);
+    return (cut.lastIndexOf(' ') > 12 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).trim();
+  }
+  function tellItem(t) {
+    const id = esc(t.id);
+    const sheet = tellSheet();
+    const hint = t.why && t.why !== 'empty' ? TELL_HINT[t.why] : '';
+    const count = t.n >= TELL_NEAR ? `${t.n} / ${TELL_MAX}` : '';
+    const off = !t.n || Boolean(t.why);
+    return S('div', { class: sheet ? 'tell sheet' : 'tell', role: 'group', 'aria-label': `Tell ${t.title}`, 'data-key': `tell:${t.id}` }, [
+      { key: 'tl', tellField: true, html: `<textarea class="tl" data-key="tl:${id}" rows="2" placeholder="${esc(`Tell ${t.short}…`)}" ` +
+        `aria-label="${esc(`Message to ${t.title}`)}" spellcheck="true" autocomplete="off" enterkeyhint="enter"></textarea>` },
+      // the title gives way (ellipsis), the machine always shows
+      `<div class="tto"><span class="tn">To ${esc(t.title)}</span><span class="tm"> on ${esc(t.machine)}</span></div>`,
+      `<div class="tbar"><span class="tmsg${hint ? ' warn' : ''}" aria-live="polite">${esc(hint)}</span>` +
+        `<span class="tcount${t.n > TELL_MAX ? ' warn' : ''}">${count}</span>` +
+        `<button class="pill quiet" data-do="tell-cancel" data-id="${id}">Cancel</button>` +
+        `<button class="pill blue" data-do="tell-send" data-id="${id}" aria-keyshortcuts="Meta+Enter"${off ? ' aria-disabled="true"' : ''}>Send</button></div>`,
+      sheet ? '<div class="thint">Tap the mic on the keyboard to speak</div>' : '',
+    ], `tell:${t.id}`);
+  }
+  function startTell(id) {
+    const a = findAgent(id);
+    if (!a || !canTell(a) || view.screen !== 'main') return;
+    if (view.rename) endRename(false);
+    setConfirm(null);
+    view.picker = null;
+    view.pacer = null;
+    view.tapKey = null;
+    clearResult(a.id);
+    const title = cleanTitle(titleOf(a)) || 'this chat';
+    view.tell = { id: a.id, title, short: shortTitle(title), machine: a.machine ?? (net.mode === 'bridge' ? 'this Mac' : 'your Mac'), n: 0, why: 'empty' };
+    tellViewport(true);
+    render({});
+    // The sheet slides up (the inline card rises in as a new list item does); never on a first paint or reduced motion.
+    const sh = tellSheet() && motionOk() ? view.tree?.kids?.find((k) => k.key === `tell:${a.id}`)?.node : null;
+    if (sh?.classList) {
+      sh.classList.add('up');
+      busy(320);
+      setTimeout(() => sh.classList.remove('up'), 340);
+    }
+    try { tellField()?.focus?.(); } catch { /* no focus in this host */ }
+  }
+  // Closes the composer and empties the field (the node may stay a moment in a leave animation: never with the text).
+  function endTell(focusRow = true) {
+    const t = view.tell;
+    if (!t) return;
+    const f = tellField();
+    if (f) f.value = '';
+    view.tell = null;
+    tellViewport(false);
+    render({});
+    if (focusRow) try { root().querySelector?.(`[data-do="tell"][data-id="${CSS.escape(String(t.id))}"]`)?.focus?.(); } catch { /* fine */ }
+  }
+  function tellInput() {
+    const t = view.tell;
+    const f = tellField();
+    if (!t || !f) return;
+    // 2 to 6 lines, growing with the text (min and max height in panel.css); then the popover follows the new height.
+    try {
+      if (f.style) {
+        f.style.height = 'auto';
+        f.style.height = `${f.scrollHeight}px`;
+        settle(); // render() reports the height only when it patched something; a keystroke usually patches nothing
+      }
+    } catch { /* no layout in this host */ }
+    const c = tellCheck(f.value);
+    const why = c.ok ? null : c.why;
+    if (c.n === t.n && why === t.why) return;
+    t.n = c.n;
+    t.why = why;
+    render({});
+  }
+  function sendTell() {
+    const t = view.tell;
+    const f = tellField();
+    if (!t || !f) return;
+    const c = tellCheck(f.value);
+    if (!c.ok) {
+      t.n = c.n;
+      t.why = c.why;
+      render({});
+      return;
+    }
+    const a = findAgent(t.id);
+    f.value = '';
+    endTell(false);
+    if (!a || !canTell(a)) {
+      setResult(t.id, false, 'That chat can’t take a message now. Nothing was sent.');
+      render({});
+      return;
+    }
+    view.telling = { id: a.id, at: Date.now() };
+    send({ action: 'agent-send', id: a.id, text: c.text });
+    setTimeout(() => { if (view.telling && Date.now() - view.telling.at >= TELL_WAIT_MS) { view.telling = null; render({}); } }, TELL_WAIT_MS + 50);
+    render({});
+  }
+  // The answer to an agent-send: "Sent" on the row, or one fixed line.
+  function tellResult(r) {
+    if (view.telling && String(view.telling.id) === String(r.id)) view.telling = null;
+    if (r.ok === true) setResult(r.id, true, 'Sent');
+    else setResult(r.id, false, tellLine(r.why));
+    render({});
+  }
+  // The phone sheet stays above the keyboard: --kb is the part of the layout viewport the keyboard covers.
+  let tellVV = null;
+  function tellViewport(on) {
+    const vv = window.visualViewport;
+    const css = document.documentElement.style;
+    if (on && tellSheet() && vv && !tellVV) {
+      tellVV = () => css?.setProperty?.('--kb', `${Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop))}px`);
+      vv.addEventListener('resize', tellVV);
+      vv.addEventListener('scroll', tellVV);
+      tellVV();
+    } else if (!on && tellVV && vv) {
+      vv.removeEventListener('resize', tellVV);
+      vv.removeEventListener('scroll', tellVV);
+      tellVV = null;
+      css?.setProperty?.('--kb', '0px');
+    }
   }
 
   // ---------- arrange (k32) ----------
@@ -2266,14 +2487,26 @@
   // never overlap, and actions go out in order.
   const POLL_MS = 2000;
   const TOKEN_KEY = 'kadans.token';
-  const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder']);
+  const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder', 'agent-send']);
   // net.state: 'idle' (bridge) | 'pairing' | 'live' | 'unpaired' (no token, or a 401) | 'offline' (the Mac did not answer)
   // | 'off' (503: phone access is turned off on the Mac) | 'install' (k29: iOS Safari with a code, "Add to Home Screen")
   // net.code: the pair code held back on the 'install' screen until "Use it in Safari instead" (never in the DOM).
   const net = { mode: 'bridge', state: 'idle', token: null, timer: null, inflight: false, chain: null, failures: 0, why: null, code: null };
+  // k46: the iPhone app (ios/) hosts this page from its bundle and carries its requests natively (URLSession, the token
+  // in the iOS Keychain), so the page never holds the token and needs no CORS. window.webkit.messageHandlers.kadansHttp
+  // takes {method, path, body?} (body as JSON text) and answers {status, body}, or rejects when the Mac did not answer.
+  // A placeholder stands in for the token, so the HTTP-mode logic here (poll, 401, 503, offline, actions) is unchanged.
+  // The app pairs and unpairs natively; it never opens the page with #pair=.
+  const nativeHttp = () => { try { return window.webkit?.messageHandlers?.kadansHttp ?? null; } catch { return null; } };
   const store = {
-    get() { try { return window.localStorage?.getItem(TOKEN_KEY) || null; } catch { return null; } },
-    set(v) { try { if (v) window.localStorage?.setItem(TOKEN_KEY, v); else window.localStorage?.removeItem(TOKEN_KEY); } catch { /* private mode */ } },
+    get() {
+      if (nativeHttp()) return 'native';
+      try { return window.localStorage?.getItem(TOKEN_KEY) || null; } catch { return null; }
+    },
+    set(v) {
+      if (nativeHttp()) return;
+      try { if (v) window.localStorage?.setItem(TOKEN_KEY, v); else window.localStorage?.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+    },
   };
   const pageVisible = () => document.visibilityState !== 'hidden' && !document.hidden;
   function deviceName() {
@@ -2282,6 +2515,13 @@
     return n.slice(0, 40);
   }
   async function call(method, path, body) {
+    const nh = nativeHttp();
+    if (nh) {
+      const r = await nh.postMessage(body !== undefined ? { method, path, body: JSON.stringify(body) } : { method, path });
+      let json = null;
+      try { json = JSON.parse(r?.body ?? ''); } catch { json = null; }
+      return { status: Number(r?.status) || 0, json };
+    }
     const headers = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (net.token) headers.Authorization = `Bearer ${net.token}`;
@@ -2459,6 +2699,7 @@
     try {
       if (window.webkit?.messageHandlers?.kadans) return false;
       if (window.top !== window) return false; // dev.html's frame (its bridge stand-in comes after load)
+      if (nativeHttp()) return true; // k46: the iPhone app (its own kadans-panel: scheme)
       if (!/^https?:$/.test(window.location.protocol)) return false;
       return !/[?&](debugFrames|dev)\b/.test(window.location.search);
     } catch { return false; }
@@ -2531,6 +2772,7 @@
   function onClick(e) {
     if (drag.noClick && Date.now() - drag.noClick < 500) { drag.noClick = 0; return; } // the release of a drag
     if (e.target?.classList?.contains?.('rn')) return; // typing a name
+    if (e.target?.classList?.contains?.('tl')) return; // k49: typing a message
     const b = e.target.closest('[data-do]');
     if (onTap(e, b)) return;
     if (!b || b.getAttribute('aria-disabled') === 'true') return;
@@ -2587,6 +2829,9 @@
       }
       case 'open': send({ action: 'open', id }); return;
       case 'rename': startRename(id); return;
+      case 'tell': startTell(id); return;
+      case 'tell-send': sendTell(); return;
+      case 'tell-cancel': endTell(); return;
       case 'dismiss': {
         view.dismissed.add(id);
         send({ action: 'dismiss', id });
@@ -2694,6 +2939,7 @@
   // Sliders: the number follows while dragging; one config-set when released (not one per step).
   function onInput(e) {
     const r = e.target;
+    if (r?.classList?.contains?.('tl')) { tellInput(); return; } // k49
     if (!r.dataset?.set) return;
     const n = root().querySelector(`[data-num="${CSS.escape(r.dataset.set)}"]`);
     if (n) n.textContent = sliderText(r);
@@ -2724,6 +2970,13 @@
   }
 
   function onKey(e) {
+    // k49: the message field owns every key: Cmd-Enter (Ctrl-Enter) sends, Escape cancels, Enter is a new line, and no
+    // key reaches the row shortcuts or closes the popover. Dictation and input methods compose first (isComposing).
+    if (view.tell && e.target?.classList?.contains?.('tl')) {
+      if (e.isComposing) return;
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault?.(); sendTell(); } else if (e.key === 'Escape') { e.preventDefault?.(); endTell(); }
+      return;
+    }
     // k32: the rename input owns Enter and Escape; a held row owns Escape; Alt+Up/Down moves the focused row.
     if (view.rename && e.target?.classList?.contains?.('rn')) {
       if (e.isComposing) return;
@@ -2756,7 +3009,9 @@
       } else onScreenClick({ dataset: { do: 'back' } });
       return;
     }
-    if (view.closeAll) {
+    if (view.tell) {
+      endTell(); // k49: Escape on the composer's buttons cancels it too, before anything else
+    } else if (view.closeAll) {
       setCloseAll(false);
       render({});
       root().querySelector('[data-do="close-all"]')?.focus();
@@ -2862,6 +3117,10 @@
     view.comp = { open: false, adding: false, removing: null, confirm: null, err: null, at: 0 };
     view.tapKey = null;
     view.rename = null;
+    if (view.tell) { const f = tellField(); if (f) f.value = ''; }
+    view.tell = null;
+    view.telling = null;
+    tellViewport(false);
     view.titles.clear();
     view.awayTitles.clear();
     view.order = null;
@@ -2878,6 +3137,7 @@
       if (drag.phase === 'on') finishDrag(false);
     }
     if (!view.shown && view.rename) endRename(false); // closing the popover never saves a half-typed name
+    if (!view.shown && view.tell) endTell(false); // k49: closing the panel drops the message; no draft is kept anywhere
     // Opening or closing the popover drops focus: a row focused earlier (a click, or a restore after a refresh) would
     // otherwise come back highlighted, ring and actions showing, the next time the popover opens.
     const a = document.activeElement;
@@ -2889,7 +3149,8 @@
   function cap(px) {
     const n = Number(px);
     if (!Number.isFinite(n) || n < 120) return;
-    document.documentElement.style?.setProperty?.('--cap', `${Math.round(n)}px`);
+    view.cap = Math.round(n);
+    document.documentElement.style?.setProperty?.('--cap', `${view.cap}px`);
     if (view.tree) settle();
   }
   // net: read-only view of the phone transport for tests ({ mode, state, token }).

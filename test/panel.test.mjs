@@ -11,13 +11,14 @@ const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'app', 'web')
 const read = (f) => readFileSync(join(WEB, f), 'utf8');
 
 // Tags and attributes the panel's own markup uses; anything else in the output came from data.
-const TAGS = new Set(['div', 'span', 'button', 'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'i', 'pre', 'p', 'input', 'img']); // img: the pairing QR (k27)
+const TAGS = new Set(['div', 'span', 'button', 'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'i', 'pre', 'p', 'input', 'img', 'textarea']); // img: the pairing QR (k27); textarea: Tell (k49)
 const ATTRS = new Set(['id', 'class', 'role', 'tabindex', 'title', 'style', 'data-key', 'data-do', 'data-id', 'data-task', 'data-k', 'data-v',
   'data-mode', 'data-until', 'data-num', 'data-set', 'data-unit', 'data-fmt', 'aria-label', 'aria-pressed', 'aria-checked',
   'aria-disabled', 'aria-expanded', 'aria-haspopup', 'aria-hidden', 'aria-valuemin', 'aria-valuemax', 'aria-valuenow',
   'aria-valuetext', 'width', 'height', 'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
   'd', 'x', 'y', 'rx', 'ry', 'cx', 'cy', 'r', 'transform', 'type', 'min', 'max', 'step', 'value', 'src', 'alt',
-  'maxlength', 'placeholder', 'spellcheck', 'autocomplete', 'enterkeyhint']); // k32: the rename field
+  'maxlength', 'placeholder', 'spellcheck', 'autocomplete', 'enterkeyhint', // k32: the rename field
+  'rows', 'aria-keyshortcuts', 'aria-live']); // k49: the Tell composer
 
 // A small DOM for the keyed patch (k14): elements made from markup keep their inner markup as a string; shells built
 // by appending children serialise from their children. Every change is logged as [op, data-key or tag], so a test can
@@ -177,6 +178,19 @@ function loadPanel(opts = {}) {
       localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
       location: { protocol: 'http:', hash: opts.http.hash ?? '', pathname: '/', search: '' },
       history: { replaceState: (a, b, url) => { g.location.hash = ''; (opts.http.replaced ??= []).push(url); } } });
+    g.top = g;
+  }
+  // k46 opts.native: { post, touched }: the iPhone app. The page sits on its own kadans-panel: scheme and has only
+  // webkit.messageHandlers.kadansHttp (post answers {status, body}); fetch, localStorage and history record a touch.
+  if (opts.native) {
+    const touched = (opts.native.touched ??= []);
+    const touch = (what) => () => { touched.push(what); return null; };
+    Object.assign(g, { webkit: { messageHandlers: { kadansHttp: { postMessage: opts.native.post } } },
+      fetch: () => { touched.push('fetch'); return Promise.reject(new Error('no fetch in the app')); },
+      navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', standalone: false },
+      localStorage: { getItem: touch('localStorage'), setItem: touch('localStorage'), removeItem: touch('localStorage') },
+      location: { protocol: 'kadans-panel:', hash: '', pathname: '/panel.html', search: '' },
+      history: { replaceState: touch('history') } });
     g.top = g;
   }
   if (opts.clock) g.Date = class extends Date { static now() { return opts.clock.now; } };
@@ -1837,7 +1851,7 @@ test('k38: other computers: a quiet header per machine after the local rows, no 
   assert.ok(at('data-key="mh:other"') < at('data-key="row:remote:other:tab-1:1"'));
   assert.match(html, /<div class="mh off" data-key="mh:spare" title="spare is offline"><span class="mn">spare<\/span> · <span class="mc">offline<\/span><\/div>/);
   assert.ok(!html.includes('data-key="row:remote:spare"'), 'an offline machine shows no rows');
-  // no stop, close, pace, replace, compact, open or rename on a remote row
+  // no stop, close, pace, replace, compact, open or rename on a remote row whose flags allow none (k48: flags below)
   const row = html.slice(at('data-key="row:remote:other:tab-2:1"'));
   assert.match(row, /<div class="acts"><\/div>/);
   assert.ok(!/data-id="remote:/.test(html), 'no action button carries a remote id');
@@ -2276,4 +2290,260 @@ test('k43: the Updates row shows only with an update payload; Automatic and Inst
   // the payload going away removes the row
   p.window.kadans.render({ update: null });
   assert.ok(!p.html().includes('>Updates<'));
+});
+
+// ---------- k46: the iPhone app's native transport ----------
+test('phone (k46): in the iPhone app every request goes through kadansHttp; no fetch, no localStorage, no token in the page', async () => {
+  const timers = [];
+  const msgs = [];
+  let state = null;
+  const answers = {
+    'GET api/state': () => [200, state],
+    'POST api/action': (b) => [200, { action: b.action, id: b.id ?? null, ok: false, why: 'Refused on the Mac' }],
+  };
+  const post = (m) => {
+    msgs.push(JSON.parse(JSON.stringify(m))); // out of the vm realm, for deepEqual
+    const a = answers[`${m.method} ${m.path}`];
+    const r = a?.(m.body === undefined ? undefined : JSON.parse(m.body));
+    return r ? Promise.resolve({ status: r[0], body: JSON.stringify(r[1]) }) : Promise.reject(new Error('offline'));
+  };
+  const native = { post };
+  state = fixture(loadPanel(), 'cruise'); // ready before the page loads: the app's page reads at once
+  const p = loadPanel({ timers, native });
+  await flush();
+  assert.equal(p.document.documentElement.dataset.shell, 'phone', 'phone layout');
+  assert.deepEqual(msgs[0], { method: 'GET', path: 'api/state' }, 'reads at once, no pairing, no body key, no token');
+  assert.equal(p.window.kadans.netState().state, 'live');
+  assert.ok(p.html().includes('Brake hooks for the Stop event'), 'the state renders');
+  const polls = () => timers.filter((t) => !t.cleared && t.ms >= 2000 && t.fn.name === 'poll');
+  assert.equal(polls().length, 1, 'polls every 2 s as in the browser');
+  // an action: the body goes as JSON text; the answer reaches the row; a fresh read follows
+  p.window.kadans.send({ action: 'stop', id: 'fx-0001' });
+  await flush();
+  const act = msgs.find((m) => m.path === 'api/action');
+  assert.deepEqual(act, { method: 'POST', path: 'api/action', body: JSON.stringify({ action: 'stop', id: 'fx-0001' }) });
+  assert.ok(p.html().includes('Refused on the Mac'));
+  assert.equal(msgs.at(-1).path, 'api/state');
+  // pull to refresh in the app sends retry: one more read
+  const n = msgs.length;
+  p.window.kadans.send({ action: 'retry' });
+  await flush();
+  assert.equal(msgs.length, n + 1);
+  assert.equal(msgs.at(-1).path, 'api/state');
+  // no answer: offline card, the last reading stays
+  answers['GET api/state'] = () => null;
+  p.window.kadans.send({ action: 'retry' });
+  await flush();
+  assert.equal(p.window.kadans.netState().state, 'offline');
+  assert.ok(p.html().includes('Brake hooks for the Stop event'), 'the last reading stays');
+  // a 401 (the Mac revoked the phone): unpaired, polling stops; the app shows its own pair screen
+  answers['GET api/state'] = () => [401, { error: 'unauthorized' }];
+  p.window.kadans.send({ action: 'retry' });
+  await flush();
+  assert.equal(p.window.kadans.netState().state, 'unpaired');
+  assert.equal(polls().length, 0);
+  assert.deepEqual(native.touched, [], 'never fetch, localStorage or history');
+  assert.ok(!JSON.stringify(msgs).includes('Bearer'), 'the page sends no token');
+});
+
+// ---------- k48: remote rows get the actions their flags allow ----------
+test('k48: a remote row gets Close/Stop and Compact where its flags allow; the clicks send its remote id; stale or flagless rows none', () => {
+  const p = loadPanel();
+  const d = fixture(p, 'remote');
+  const set = (id, o) => Object.assign(d.agents.find((a) => a.id === id), o);
+  set('remote:other:tab-1:1', { status: 'idle', canStop: true, canCompact: true, canSend: true }); // an idle Claude chat there
+  set('remote:other:tab-2:1', { status: 'working', canStop: true, canCompact: false, canSend: false });
+  p.window.kadans.render(d);
+  let idle = rowHtml(p.html(), 'remote:other:tab-1:1');
+  assert.match(idle, /data-do="compact" data-id="remote:other:tab-1:1"/);
+  assert.match(idle, /data-do="close" data-id="remote:other:tab-1:1"/);
+  const busy = rowHtml(p.html(), 'remote:other:tab-2:1');
+  assert.match(busy, /data-do="confirm" data-id="remote:other:tab-2:1"/);
+  assert.doesNotMatch(busy, /data-do="compact"/);
+  for (const row of [idle, busy]) assert.doesNotMatch(row, /data-do="(pace|resume|replace|rename|open)"/); // this computer only
+  // close: confirm first, then one stop with the remote id
+  p.document.querySelector('[data-do="close"][data-id="remote:other:tab-1:1"]').click();
+  assert.match(rowHtml(p.html(), 'remote:other:tab-1:1'), /Close this chat\?/);
+  assert.equal(p.sent.filter((m) => m.action === 'stop').length, 0);
+  p.document.querySelector('[data-do="stop"][data-id="remote:other:tab-1:1"]').click();
+  assert.deepEqual(p.sent.filter((m) => m.action === 'stop').map((m) => m.id), ['remote:other:tab-1:1']);
+  // compact: confirm, send, and the CLI's answer settles it (no context size to watch on another computer)
+  p.document.querySelector('[data-do="compact"][data-id="remote:other:tab-1:1"]').click();
+  p.document.querySelector('[data-do="compact-go"][data-id="remote:other:tab-1:1"]').click();
+  assert.deepEqual(JSON.parse(JSON.stringify(compacts(p))), [{ action: 'compact', id: 'remote:other:tab-1:1' }]);
+  p.window.kadans.result({ action: 'compact', id: 'remote:other:tab-1:1', ok: true, why: '' });
+  assert.match(rowHtml(p.html(), 'remote:other:tab-1:1'), /Sent \/compact/);
+  // a stale machine, or a row without flags: no buttons at all
+  for (const a of d.agents) if (a.machine === 'other') a.machineStale = true;
+  p.window.kadans.render(d);
+  assert.match(rowHtml(p.html(), 'remote:other:tab-1:1'), /<div class="acts"><\/div>/);
+  assert.match(rowHtml(p.html(), 'remote:other:tab-2:1'), /<div class="acts"><\/div>/);
+});
+
+// ---------- k49: Tell an agent (the guard's tests are in test/tell.test.mjs; these need this file's fake DOM) ----------
+const TELL_MSG = 'SECRET-MESSAGE run the tests, careful with the migrations';
+function tellPanel(opts = {}) {
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers, ...opts });
+  const data = () => fixture(p, 'tell');
+  p.window.kadans.reset();
+  p.window.kadans.render(data());
+  const key = (e) => p.docListeners.keydown.forEach((fn) => fn({ preventDefault() {}, ...e }));
+  const field = (id) => p.el.find(`tl:${id}`);
+  const type = (id, v) => { const f = field(id); f.value = v; p.el.listeners.input.forEach((fn) => fn({ target: f })); return f; };
+  const sends = () => JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'agent-send')));
+  return { p, clock, timers, data, key, field, type, sends };
+}
+
+test('k49: Tell on rows that can take a message (Orca chats here, idle or working; remote rows whose flags allow send)', () => {
+  const { p, data } = tellPanel();
+  const html = p.html();
+  assert.match(rowHtml(html, 'fx-0501'), /data-do="tell" data-id="fx-0501"/); // working, in Orca
+  assert.match(rowHtml(html, 'fx-0502'), /data-do="tell" data-id="fx-0502"/); // idle, in Orca
+  assert.doesNotMatch(rowHtml(html, 'fx-0503'), /data-do="tell"/); // waits on a question
+  assert.match(rowHtml(html, 'remote:other:tab-1:1'), /data-do="tell" data-id="remote:other:tab-1:1"/);
+  const d = data();
+  d.agents[0].orca = null; // not in an Orca terminal Kadans knows
+  d.agents[3].canSend = false;
+  p.window.kadans.render(d);
+  assert.doesNotMatch(rowHtml(p.html(), 'fx-0501'), /data-do="tell"/);
+  assert.doesNotMatch(rowHtml(p.html(), 'remote:other:tab-1:1'), /data-do="tell"/);
+});
+
+test('k49: Cmd-Enter sends agent-send {id, text}; the field is empty after; the row says Sending…, then Sent', () => {
+  const { p, data, key, field, type, sends } = tellPanel();
+  p.tap({ do: 'tell', id: 'fx-0501' });
+  const html = p.html();
+  assert.match(html, /<textarea class="tl" data-key="tl:fx-0501" rows="2" placeholder="Tell Brake hooks for the…"/);
+  assert.match(html, /To Brake hooks for the Stop event<\/span><span class="tm"> on this Mac/);
+  assert.match(html, /data-do="tell-send" data-id="fx-0501" aria-keyshortcuts="Meta\+Enter" aria-disabled="true">Send/); // empty: off
+  const f = type('fx-0501', `  ${TELL_MSG}\n`);
+  p.window.kadans.render(data()); // a refresh keeps the field's node (what was typed stays)
+  assert.equal(field('fx-0501'), f);
+  key({ key: 'Enter', target: f }); // a plain Enter is a new line, not a send
+  assert.equal(sends().length, 0);
+  key({ key: 'Enter', metaKey: true, target: f });
+  assert.deepEqual(sends(), [{ action: 'agent-send', id: 'fx-0501', text: TELL_MSG }]);
+  assert.equal(f.value, '');
+  assert.doesNotMatch(p.html(), /class="tl"/);
+  assert.match(rowHtml(p.html(), 'fx-0501'), /Sending…/);
+  p.window.kadans.result({ action: 'agent-send', id: 'fx-0501', ok: true, why: '' });
+  assert.match(rowHtml(p.html(), 'fx-0501'), /<span class="ld">Sent<\/span>/);
+  assert.ok(!p.html().includes('SECRET-MESSAGE'));
+  // remote: the machine is named
+  p.tap({ do: 'tell', id: 'remote:other:tab-1:1' });
+  assert.match(p.html(), /To Make the rain sound loop without a gap<\/span><span class="tm"> on other/);
+});
+
+test('k49: Esc and Cancel close the composer and empty the field; nothing is sent and the popover stays open', () => {
+  const { p, key, type, sends } = tellPanel();
+  p.tap({ do: 'tell', id: 'fx-0502' });
+  const f = type('fx-0502', TELL_MSG);
+  key({ key: 'Escape', target: f });
+  assert.equal(f.value, '');
+  assert.doesNotMatch(p.html(), /class="tl"/);
+  p.tap({ do: 'tell', id: 'fx-0502' });
+  const g = type('fx-0502', TELL_MSG);
+  p.tap({ do: 'tell-cancel', id: 'fx-0502' });
+  assert.equal(g.value, '');
+  p.tap({ do: 'tell', id: 'fx-0502' });
+  const h = type('fx-0502', TELL_MSG);
+  key({ key: 'ArrowUp', altKey: true, target: h }); // row shortcuts do not fire from the field
+  p.window.kadans.visible(false); // closing the panel keeps no draft
+  assert.equal(h.value, '');
+  assert.doesNotMatch(p.html(), /class="tl"/);
+  assert.deepEqual(sends(), []);
+  assert.ok(!p.sent.some((m) => m.action === 'close' || m.action === 'reorder'));
+});
+
+test('k49: a refusal shows one fixed line, never the text; a leading !, / or # is caught before sending', () => {
+  const { p, key, type, sends } = tellPanel();
+  for (const why of [`not sent: ${TELL_MSG}`, 'not sent: That chat has unsent text: nothing was sent', 'Too many messages; wait a minute', 'weird']) {
+    p.window.kadans.result({ action: 'agent-send', id: 'fx-0502', ok: false, why });
+    const row = rowHtml(p.html(), 'fx-0502');
+    assert.ok(!row.includes('SECRET-MESSAGE'), why);
+    assert.match(row, /class="warn"/);
+  }
+  assert.match(rowHtml(p.html(), 'fx-0502'), />Not sent\.</);
+  p.window.kadans.result({ action: 'agent-send', id: 'fx-0502', ok: false, why: 'Too many messages; wait a minute' });
+  assert.match(rowHtml(p.html(), 'fx-0502'), />Too many messages; wait a minute</);
+  for (const lead of ['!rm -rf build', '/clear', '# remember this', '  /compact']) {
+    p.tap({ do: 'tell', id: 'fx-0502' });
+    const f = type('fx-0502', lead);
+    assert.match(p.html(), /Messages can’t start with !, \/ or #/, lead);
+    assert.match(p.html(), /data-do="tell-send" data-id="fx-0502" aria-keyshortcuts="Meta\+Enter" aria-disabled="true"/);
+    key({ key: 'Enter', metaKey: true, target: f });
+    assert.match(p.html(), /class="tl"/, 'the composer stays open with the hint');
+    key({ key: 'Escape', target: f });
+  }
+  assert.deepEqual(sends(), []);
+});
+
+test('k49: the phone page and the iPhone app send the same action from a bottom sheet; nothing in localStorage', async () => {
+  const calls = [];
+  let answer = { action: 'agent-send', id: 'fx-0501', ok: true, why: '' };
+  const fetch = async (url, init) => {
+    calls.push({ url, body: init.body ? JSON.parse(init.body) : null });
+    if (url.includes('state')) return { status: 200, json: async () => ({ status: null, agents: [] }) };
+    return { status: answer.ok ? 200 : 429, json: async () => answer };
+  };
+  const store = new Map([['kadans.token', 'tok']]);
+  const ph = loadPanel({ http: { fetch, store } });
+  await flush();
+  ph.window.kadans.render(fixture(ph, 'tell'));
+  ph.tap({ do: 'tell', id: 'fx-0501' });
+  const html = ph.html();
+  assert.match(html, /class="tell sheet"/);
+  assert.match(html, /Tap the mic on the keyboard to speak/);
+  assert.match(html, /on your Mac/);
+  const f = ph.el.find('tl:fx-0501');
+  f.value = TELL_MSG;
+  ph.el.listeners.input.forEach((fn) => fn({ target: f }));
+  ph.tap({ do: 'tell-send', id: 'fx-0501' });
+  await flush();
+  assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'agent-send' && c.body.id === 'fx-0501' && c.body.text === TELL_MSG));
+  assert.equal(f.value, '');
+  // the k48 rate limit: its plain line
+  answer = { action: 'agent-send', id: 'fx-0501', ok: false, why: 'Too many messages; wait a minute' };
+  ph.window.kadans.render(fixture(ph, 'tell')); // the fake Mac's poll answered with no agents
+  ph.tap({ do: 'tell', id: 'fx-0501' });
+  const g = ph.el.find('tl:fx-0501');
+  g.value = 'and one more thing';
+  ph.el.listeners.input.forEach((fn) => fn({ target: g }));
+  ph.tap({ do: 'tell-send', id: 'fx-0501' });
+  await flush();
+  ph.window.kadans.render(fixture(ph, 'tell'));
+  assert.match(rowHtml(ph.html(), 'fx-0501'), /Too many messages; wait a minute/);
+  assert.deepEqual([...store.keys()], ['kadans.token']);
+  assert.ok(![...store.values()].some((v) => String(v).includes('SECRET') || String(v).includes('one more')));
+});
+
+test('k49: the iPhone app gets the bottom sheet too and sends agent-send through kadansHttp; nothing in localStorage', async () => {
+  const msgs = [];
+  let state = null;
+  const post = (m) => {
+    msgs.push(JSON.parse(JSON.stringify(m)));
+    if (m.path === 'api/state') return Promise.resolve({ status: 200, body: JSON.stringify(state) });
+    const b = JSON.parse(m.body);
+    return Promise.resolve({ status: 200, body: JSON.stringify({ action: b.action, id: b.id, ok: true, why: '' }) });
+  };
+  const native = { post };
+  state = fixture(loadPanel(), 'tell');
+  const p = loadPanel({ native });
+  await flush();
+  assert.equal(p.document.documentElement.dataset.shell, 'phone');
+  p.tap({ do: 'tell', id: 'fx-0501' });
+  assert.match(p.html(), /class="tell sheet"/);
+  assert.match(p.html(), /Tap the mic on the keyboard to speak/);
+  const f = p.el.find('tl:fx-0501');
+  f.value = TELL_MSG;
+  p.el.listeners.input.forEach((fn) => fn({ target: f }));
+  p.tap({ do: 'tell-send', id: 'fx-0501' });
+  await flush();
+  const act = msgs.find((m) => m.path === 'api/action');
+  assert.deepEqual(JSON.parse(act.body), { action: 'agent-send', id: 'fx-0501', text: TELL_MSG });
+  assert.equal(f.value, '');
+  assert.match(rowHtml(p.html(), 'fx-0501'), /<span class="ld">Sent<\/span>/);
+  assert.deepEqual(native.touched, [], 'never fetch, localStorage or history');
 });

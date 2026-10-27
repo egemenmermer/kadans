@@ -54,7 +54,7 @@ else if (cmd === 'environment add') {
   const wrap = join(root, 'fake-orca.sh'); // node's path may hold spaces, which a #! line cannot
   writeFileSync(wrap, `#!/bin/sh\nexec "${process.execPath}" "${fake}" "$@"\n`);
   chmodSync(wrap, 0o755);
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: wrap };
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: wrap, KADANS_ORCA_TIMEOUT_MS: '30000' };
   const cli = (args, input = '') => {
     const r = spawnSync(process.execPath, [BIN, ...args], { input, env, encoding: 'utf8', timeout: 20000 });
     return { code: r.status, out: r.stdout, err: r.stderr };

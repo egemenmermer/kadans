@@ -50,6 +50,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Kadans"
 cp -R "$ROOT/app/web" "$APP/Contents/Resources/web"
+# k47: the app icon (logo a). Committed, not generated here: the free build has no Chromium; regenerate with scripts/make-icns.mjs.
+[ -f "$ROOT/app/mac/Kadans.icns" ] || { echo "build-app: app/mac/Kadans.icns missing" >&2; exit 1; }
+cp "$ROOT/app/mac/Kadans.icns" "$APP/Contents/Resources/Kadans.icns"
 if [ "$SPARKLE" = 1 ]; then
   FW="$SCRATCH/release/Sparkle.framework"
   [ -d "$FW" ] || { echo "build-app: Sparkle.framework not found: $FW" >&2; exit 1; }
@@ -84,6 +87,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <dict>
   <key>CFBundleExecutable</key><string>Kadans</string>
   <key>CFBundleIdentifier</key><string>dev.kadans.app</string>
+  <key>CFBundleIconFile</key><string>Kadans</string>
   <key>CFBundleName</key><string>Kadans</string>
   <key>CFBundleDisplayName</key><string>Kadans</string>
   <key>CFBundlePackageType</key><string>APPL</string>
