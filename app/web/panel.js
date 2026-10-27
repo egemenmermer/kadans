@@ -163,10 +163,12 @@
     // k27: phoneWant = a flipped Phone switch waiting for the app; pairTimer = the code countdown; tapKey = the row whose
     // actions a tap opened (touch screens have no hover).
     phoneWant: null, pairTimer: null, tapKey: null,
+    // k41: Settings › Computers: { open (the add form), adding (sent, waiting), removing (id), confirm (id), err (code) }.
+    comp: { open: false, adding: false, removing: null, confirm: null, err: null, at: 0 },
     // k32: rename = the chat whose title is being edited { id, start }; titles = renames sent, shown until the data
     // agrees { title, prev, at }; order = the owner's new order of the live rows { ids, at }, shown until the data
     // agrees; liveIds = the live rows in the order last drawn.
-    rename: null, titles: new Map(), order: null, liveIds: [] };
+    rename: null, titles: new Map(), order: null, liveIds: [], awayTitles: new Map() };
 
   // ---------- motion (k9a, k14) ----------
   // Calm and short: 120-260 ms, transform and opacity only. Nothing moves on the first paint, in the 300 ms after it
@@ -495,11 +497,48 @@
   function titleOf(a) {
     const want = view.titles.get(String(a.id)); // k32: a rename sent, shown until the data has it
     if (want?.title) return want.title;
+    if (a.machine) return remoteTitle(a);
     if (a.title && !want) return String(a.title);
     const p = String(a.firstPrompt ?? '').replace(/\s+/g, ' ').trim();
     if (p) return p.length > 60 ? `${p.slice(0, 59).trimEnd()}…` : p;
     if (a.orca?.title) return String(a.orca.title);
     return a.project ? `Session in ${a.project}` : 'Claude Code session';
+  }
+
+  // k42: another computer's row: Orca's own title, else the prompt's first line (sent only by the run that got a fresh
+  // answer, then kept here in page memory until the machine goes stale or offline), else the branch, else
+  // "Session in <project>". The prompt title is never written anywhere (no storage, no send).
+  function remoteTitle(a) {
+    if (a.title && a.titleSource === 'orca') return String(a.title);
+    const p = a.titleSource === 'prompt' && a.title ? String(a.title) : view.awayTitles.get(String(a.id));
+    if (p) return p;
+    if (a.title) return String(a.title);
+    return a.project ? `Session in ${a.project}` : 'Session on another computer';
+  }
+  function rememberAway(away) {
+    const keep = new Set();
+    for (const a of away) {
+      const id = String(a.id);
+      if (a.machineStale === true || a.machineOffline === true) continue;
+      if (a.titleSource === 'prompt' && a.title) view.awayTitles.set(id, String(a.title));
+      keep.add(id);
+    }
+    for (const id of [...view.awayTitles.keys()]) if (!keep.has(id)) view.awayTitles.delete(id);
+  }
+  const AGENT_TYPE = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', opencode: 'OpenCode', cursor: 'Cursor' };
+  // k42: a remote row's meta parts, in order of need (the line drops whole parts from the end; see .pv.meta):
+  // "Working 1 hr 10 min" · Claude · PowerShell · 1 sub-agent · <project>.
+  function remoteMeta(st, a, now) {
+    const since = finite(a.stateSince) ? a.stateSince : finite(a.lastSeen) ? a.lastSeen : null;
+    const d = since === null ? '' : ` ${dur(now - since)}`;
+    const word = st === 'needs-you' ? 'Needs you' : st === 'idle' ? 'Idle' : st === 'ended' ? 'Ended' : 'Working';
+    const pre = st === 'needs-you' ? `<span class="need">${word}</span>${esc(d)}` : esc(`${word}${d}`);
+    const type = typeof a.agentType === 'string' && a.agentType.trim()
+      ? own(AGENT_TYPE, a.agentType.trim().toLowerCase(), a.agentType.trim().slice(0, 20)) : null;
+    const tool = st === 'working' && typeof a.toolName === 'string' && a.toolName.trim() ? a.toolName.trim().slice(0, 40) : null;
+    const n = finite(a.subagentCount) && a.subagentCount > 0 ? plural(a.subagentCount, 'sub-agent', 'sub-agents') : null;
+    const segs = [['at', type], ['tl', tool], ['sc', n], ['pj', a.project]].filter(([, t]) => t).map(([c, t]) => [c, String(t)]);
+    return { pre, preText: `${word}${d}. `, segs };
   }
 
   function prefixOf(st, a, now) {
@@ -597,6 +636,7 @@
   // The host's answer to a bridge action: { action, id, ok, why }. Only a failed stop, compact or replace shows (why: the
   // first line of the CLI's message, text only); the rest is read from the next refresh, as before.
   function actionResult(r) {
+    if (r && typeof r === 'object' && (r.action === 'computers-add' || r.action === 'computers-remove')) return compResult(r); // k41
     // k32: a refused reorder drops the local order (the rows go back to the served order); a refused rename drops the
     // name shown early and says why on the row.
     if (r && typeof r === 'object' && r.ok !== true && r.action === 'reorder') {
@@ -740,8 +780,14 @@
       const tag = tagOn ? `<span class="tag" title="${esc(tagTip)}">Compact?</span> ${esc(ctx)} · ` : '';
       // k32: each part sits in its own span so a narrow row shortens the project first (then model, then age) and never
       // cuts the context number ("430k co…"); see .pv.meta in panel.css.
-      const segs = [['pj', a.project], ['fm', st === 'ended' ? null : family(a.model)], ['cx', tagOn ? null : ctx],
-        ['du', st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt)]].filter(([, t]) => t).map(([c, t]) => [c, String(t)]);
+      // k42: parts in order of need; a line too narrow drops whole parts from the end (.pv.meta wraps them out of
+      // sight), never squeezes one to "t…". The state words and a time always lead: the age right after the state
+      // (and progress), except on an idle row, whose lead already says how long ("Idle 7 min").
+      const age = st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt);
+      const rm = a.machine && !quiet ? remoteMeta(st, a, now) : null;
+      if (rm) [pre, preText] = [rm.pre, rm.preText];
+      const segs = rm ? rm.segs : [['du', st === 'idle' ? null : age], ['cx', tagOn ? null : ctx], ['pj', a.project],
+        ['fm', st === 'ended' ? null : family(a.model)], ['du', st === 'idle' ? age : null]].filter(([, t]) => t).map(([c, t]) => [c, String(t)]);
       let line = quiet ? '' : segs.map(([, t]) => t).join(' · ');
       // A refused action: its reason is the whole meta line (the full text in the title), reusing the .warn line.
       if (rs && !rs.ok) [pre, preText, line] = [`<span class="warn" title="${esc(rs.why)}" style="${REASON_STYLE}">${esc(rs.why)}</span>`, `${rs.why}. `, ''];
@@ -1033,6 +1079,123 @@
     view.pairTimer = setTimeout(() => { view.pairTimer = null; if (view.screen === 'settings') renderScreen(); }, 1000 - (Date.now() % 1000) || 1000);
   }
 
+  // k41: Settings › Computers (Mac only, under Phone). The app pushes {computers: {list: [{id, name, status, agents}] |
+  // null, error: <code> | null}}; the page sends computers-add {name, code} / computers-remove {id} and hears how each
+  // ended through kadans.result. Every line shown is the page's own text (error codes map to COMP_ERR). The pairing
+  // code is read from the field at the click, sent once and the field is cleared at once; it is never put in markup,
+  // view state or a log. The field has no value attribute, so a refresh never writes it back.
+  const COMP_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} -]{0,31}$/u;
+  const COMP_CODE_RE = /^orca:\/\/pair\?[A-Za-z0-9_.~%=&+/:-]+$/;
+  const COMP_ERR = {
+    name: 'Use letters, digits, spaces or dashes (up to 32).',
+    code: 'That is not a pairing code. Copy the whole orca://pair?… line.',
+    taken: 'A computer with that name is already here.',
+    add: 'Couldn’t add it. Each code works once, for a short time: make a new one.',
+    noorca: 'Orca is not installed on this Mac.',
+    remove: 'Couldn’t remove that computer.',
+    busy: 'Still working on the last request.',
+  };
+  const COMP_WAIT_MS = 60_000;
+  function compData() {
+    const c = view.data?.computers;
+    return c && typeof c === 'object' ? c : null;
+  }
+  // The add form's fields, found in the last drawn tree (not by selector: the nodes may be inside the old screen).
+  function compField(which, it = view.stree) {
+    if (!it) return null;
+    if (it.field === which) return it.node ?? null;
+    for (const k of it.kids ?? []) {
+      const n = compField(which, k);
+      if (n) return n;
+    }
+    return null;
+  }
+  function compLine(c) {
+    const st = c.status;
+    const n = Number.isInteger(c.agents) && c.agents >= 0 ? plural(c.agents, 'agent', 'agents') : null;
+    if (st === 'online') return n ? `online · ${n}` : 'online';
+    if (st === 'stale') return n ? `not live · ${n}` : 'not live';
+    if (st === 'offline') return 'offline';
+    return 'not checked yet';
+  }
+  function compItems(p) {
+    const c = view.comp;
+    if (c.adding && Date.now() - c.at > COMP_WAIT_MS) c.adding = false; // no answer: let the owner try again
+    const items = [];
+    const list = Array.isArray(p.list) ? p.list.filter((x) => x && typeof x.id === 'string' && x.id && typeof x.name === 'string') : null;
+    for (const m of list ?? []) {
+      const name = m.name.trim().slice(0, 40) || 'Computer';
+      const id = esc(m.id);
+      let ctl;
+      if (c.removing === m.id) ctl = '<span class="d">Removing…</span>';
+      else if (c.confirm === m.id) {
+        ctl = `<span class="cfm"><button class="pill quiet" data-do="comp-keep" data-key="comp-keep:${id}">Cancel</button>` +
+          `<button class="pill danger" data-do="comp-remove-go" data-id="${id}" data-key="comp-go:${id}" aria-label="Remove ${esc(name)} now">Remove</button></span>`;
+      } else ctl = `<button class="pill quiet danger" data-do="comp-remove" data-id="${id}" data-key="comp-rm:${id}" aria-label="Remove ${esc(name)}">Remove</button>`;
+      items.push(sItem(`comp:${m.id}`, esc(name), esc(c.confirm === m.id ? 'Unpair it from this Mac? Its agents leave the list.' : compLine(m)), ctl, m.status === 'offline' ? ' off' : ''));
+    }
+    if (!list) items.push({ key: 'comp-list-err', html: '<div class="it col un"><div class="d warn">Couldn’t read your computers.</div></div>' });
+    const err = c.err && Object.hasOwn(COMP_ERR, c.err) ? `<div class="d warn" role="status">${esc(COMP_ERR[c.err])}</div>` : '';
+    if (!c.open) {
+      items.push(sItem('comp-add', 'Add a computer', list?.length ? 'See agents on another computer here too.' : 'See the agents on your other computers here.',
+        '<button class="pill blue" data-do="comp-open" data-key="comp-open">Add…</button>'));
+      if (err) items.push({ key: 'comp-err', html: `<div class="it col un">${err}</div>` });
+      return items;
+    }
+    const f = S('div', { class: 'it col cform' }, [
+      { key: 'comp-hint', html: '<div class="d">On the other computer run: <span class="code">npx\u00a0kadans\u00a0connect</span></div>' },
+      { key: 'comp-name', field: 'name', html: '<input class="fld" type="text" data-key="comp-name" placeholder="PC" maxlength="32" aria-label="Name for this computer" spellcheck="false" autocomplete="off">' },
+      { key: 'comp-code', field: 'code', html: '<input class="fld" type="password" data-key="comp-code" placeholder="Paste the code (orca://pair?…)" aria-label="Pairing code" spellcheck="false" autocomplete="off" enterkeyhint="done">' },
+      err ? { key: 'comp-ferr', html: err } : '',
+      { key: `comp-foot:${c.adding}`, html: c.adding
+        ? '<div class="cfoot"><span class="d">Adding…</span></div>'
+        : '<div class="cfoot"><button class="pill quiet" data-do="comp-close" data-key="comp-close">Cancel</button><button class="pill blue" data-do="comp-add" data-key="comp-add">Add</button></div>' },
+    ], 'comp-form', true);
+    items.push(f);
+    return items;
+  }
+  function compOpen(open) {
+    const c = view.comp;
+    Object.assign(c, { open, err: null, confirm: null });
+    renderScreen();
+    if (open) try { compField('name')?.focus?.(); } catch { /* no focus in this host */ }
+  }
+  // Add: reads both fields, clears the code field at once (also when the page refuses it), sends one computers-add.
+  function compSubmit() {
+    const c = view.comp;
+    if (c.adding) return;
+    const nameEl = compField('name');
+    const codeEl = compField('code');
+    const name = String(nameEl?.value ?? '').trim() || 'PC';
+    let code = String(codeEl?.value ?? '').trim();
+    if (codeEl) codeEl.value = '';
+    if (!COMP_NAME_RE.test(name)) c.err = 'name';
+    else if (code.length > 2048 || !COMP_CODE_RE.test(code)) c.err = 'code';
+    else {
+      Object.assign(c, { err: null, adding: true, at: Date.now() });
+      send({ action: 'computers-add', name, code });
+      setTimeout(() => { if (view.screen === 'settings') renderScreen(); }, COMP_WAIT_MS + 50);
+    }
+    code = '';
+    renderScreen();
+  }
+  // kadans.result for computers-add / computers-remove: ok closes the form (add) or ends Removing…; a failure shows the
+  // error code the app pushed with the list just before (never the result's own text).
+  function compResult(r) {
+    const c = view.comp;
+    const e = compData()?.error;
+    const code = typeof e === 'string' && Object.hasOwn(COMP_ERR, e) ? e : null;
+    if (r.action === 'computers-add') {
+      c.adding = false;
+      if (r.ok === true) Object.assign(c, { open: false, err: null });
+      else c.err = code ?? 'add';
+    } else {
+      c.removing = null;
+      c.err = r.ok === true ? null : code ?? 'remove';
+    }
+    if (view.screen === 'settings') renderScreen();
+  }
+
   // Hook changes grouped by hook kind (the event hook alone covers seven events).
   function hookGroups(install) {
     const groups = new Map();
@@ -1143,6 +1306,8 @@
 
     const ph = phoneData();
     if (ph && net.mode === 'bridge') body.push(...sGroup('phone', 'Phone', phoneItems(ph)));
+    const cp = compData();
+    if (cp && net.mode === 'bridge') body.push(...sGroup('computers', 'Computers', compItems(cp))); // k41: pairing stays on the Mac
 
     body.push(...sGroup('general', 'General', [
       sItem('lang', 'Status line language', 'The line under Claude Code’s prompt.', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']])),
@@ -1226,7 +1391,7 @@
   function render(data) {
     const d = data && typeof data === 'object' ? data : {};
     const next = { ...(view.data ?? {}) };
-    for (const k of ['status', 'agents', 'config', 'install', 'phone']) if (k in d) next[k] = d[k];
+    for (const k of ['status', 'agents', 'config', 'install', 'phone', 'computers']) if (k in d) next[k] = d[k];
     view.data = next;
     if ('phone' in d && view.phoneWant && (d.phone?.on === view.phoneWant.on || d.phone?.error)) view.phoneWant = null;
     if ('config' in d) settlePending(d.config);
@@ -1246,6 +1411,7 @@
     const now = finite(status?.now) ? status.now : Date.now();
     const g = gauge(status, now);
     const { all, old, live: served, away } = split(now);
+    rememberAway(away);
     const live = applyOrder(served);
     view.liveIds = live.map((a) => a.id);
     settleTitles(all);
@@ -1272,23 +1438,28 @@
       if (hk) blocks.push({ key: 'hook', html: hk });
     }
     blocks.push(g.item);
+    // k42: the gauge (above) and the bottom bar (below) never scroll; everything between them (Agents, sub-agents, other
+    // computers, Up next) is one scroll area, which scrolls only when the panel cannot fit it (.panel max-height).
+    const area = [];
     if (g.mode !== 'no_claude') {
-      blocks.push({ key: 'sh', html: `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>` });
-      const rows = agentRows(live, now, tasks);
-      if (old.length) rows.push(groupHtml(old, now), ...(view.idleOpen ? agentRows(old, now, tasks) : []));
-      rows.push(...machineRows(away, now, tasks));
+      area.push({ key: 'sh', html: `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>` });
       if (all.length) {
-        const list = S('div', { class: 'list', id: 'k-list' }, rows, 'list', true);
-        list.fade = true;
-        blocks.push(list);
+        area.push(...agentRows(live, now, tasks));
+        if (old.length) area.push(groupHtml(old, now), ...(view.idleOpen ? agentRows(old, now, tasks) : []));
+        area.push(...machineRows(away, now, tasks));
       } else {
-        blocks.push(S('div', { class: 'empty' }, [blob('egg', 'idle', 30), '<div><div class="nm">No agents running</div>' +
+        area.push(S('div', { class: 'empty' }, [blob('egg', 'idle', 30), '<div><div class="nm">No agents running</div>' +
           '<div class="s">They show up here when Claude Code starts one.</div></div>'], 'empty'));
       }
     }
     if (g.mode !== 'no_claude' && g.mode !== 'no_data' && g.mode !== 'error') {
       const up = upNext(status?.queue, g.gas);
-      if (up) blocks.push({ key: 'upnext', html: up });
+      if (up) area.push({ key: 'upnext', html: up });
+    }
+    if (area.length) {
+      const list = S('div', { class: 'list', id: 'k-list' }, area, 'list', true);
+      list.fade = true;
+      blocks.push(list);
     }
     blocks.push(bottom(status, g.mode));
     // k27 phone: pairing / pair again replace the panel; "can't reach your Mac" sits above the last reading.
@@ -1769,8 +1940,9 @@
     for (const it of listKids()) {
       const k = String(it.key ?? '');
       if (k.startsWith('row:') && live.has(k.slice(4))) out.push({ id: k.slice(4), nodes: [it.node] });
-      else if (k === 'grp' || k.startsWith('row:')) break;
-      else if (out.length && it.node) out[out.length - 1].nodes.push(it.node);
+      else if (!out.length) continue; // k42: the Agents heading sits in the scroll area above the rows
+      else if (/^(sub|menu|why):/.test(k) && it.node) out[out.length - 1].nodes.push(it.node);
+      else break; // the idle group, another computer's header, Up next: the end of the live rows
     }
     for (const b of out) {
       const last = b.nodes[b.nodes.length - 1];
@@ -2408,6 +2580,18 @@
       case 'phone-pair': send({ action: 'phone-pair' }); return true;
       case 'pair-here': pairHere(); return true;
       case 'phone-revoke': if (b.dataset.id) send({ action: 'phone-revoke', id: b.dataset.id }); return true;
+      case 'comp-open': compOpen(true); return true;
+      case 'comp-close': compOpen(false); return true;
+      case 'comp-add': compSubmit(); return true;
+      case 'comp-remove': if (b.dataset.id) { Object.assign(view.comp, { confirm: b.dataset.id, err: null }); renderScreen(); } return true;
+      case 'comp-keep': view.comp.confirm = null; renderScreen(); return true;
+      case 'comp-remove-go':
+        if (b.dataset.id && !view.comp.removing) {
+          Object.assign(view.comp, { confirm: null, removing: b.dataset.id, err: null });
+          send({ action: 'computers-remove', id: b.dataset.id });
+          renderScreen();
+        }
+        return true;
       case 'apply': view.applyConfirm = true; renderScreen(); root().querySelector('[data-do="apply-go"]')?.focus(); return true;
       case 'apply-cancel': view.applyConfirm = false; renderScreen(); root().querySelector('[data-do="apply"]')?.focus(); return true;
       case 'apply-go':
@@ -2458,6 +2642,12 @@
     if (view.rename && e.target?.classList?.contains?.('rn')) {
       if (e.isComposing) return;
       if (e.key === 'Enter') { e.preventDefault?.(); endRename(true); } else if (e.key === 'Escape') { e.preventDefault?.(); endRename(false); }
+      return;
+    }
+    // k41: the add form: Enter adds, Escape closes it.
+    const fk = e.target?.getAttribute?.('data-key');
+    if (view.comp.open && (fk === 'comp-name' || fk === 'comp-code') && !e.isComposing) {
+      if (e.key === 'Enter') { e.preventDefault?.(); compSubmit(); } else if (e.key === 'Escape') { e.preventDefault?.(); compOpen(false); }
       return;
     }
     if (drag.phase && e.key === 'Escape') {
@@ -2583,9 +2773,11 @@
     view.compact = null;
     view.result = null;
     view.phoneWant = null;
+    view.comp = { open: false, adding: false, removing: null, confirm: null, err: null, at: 0 };
     view.tapKey = null;
     view.rename = null;
     view.titles.clear();
+    view.awayTitles.clear();
     view.order = null;
     setConfirm(null);
   }
@@ -2607,9 +2799,16 @@
     view.focusKey = null;
     scheduleBlinks();
   }
+  // k42: the host's room for the popover on this screen (px): the panel's max height. Only the scroll area gives way.
+  function cap(px) {
+    const n = Number(px);
+    if (!Number.isFinite(n) || n < 120) return;
+    document.documentElement.style?.setProperty?.('--cap', `${Math.round(n)}px`);
+    if (view.tree) settle();
+  }
   // net: read-only view of the phone transport for tests ({ mode, state, token }).
   const netState = () => ({ mode: net.mode, state: net.state, token: net.token, why: net.why, polling: net.timer !== null, tapKey: view.tapKey });
-  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats, blinkState, staleReading, netState, startHttp,
+  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, cap, patchStats, blinkState, staleReading, netState, startHttp,
     arrangeState: () => ({ phase: drag.phase, from: drag.from, to: drag.to, out: drag.out, order: view.order?.ids ?? null, rename: view.rename?.id ?? null }) };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

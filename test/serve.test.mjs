@@ -229,6 +229,8 @@ test('actions: everything else is refused with 400 and runs nothing', async () =
     const refused = [
       { action: 'autopace', on: true }, { action: 'install-apply' }, { action: 'install-preview' }, { action: 'size', height: 100 },
       { action: 'close' }, { action: 'settings' }, { action: 'retry' }, { action: 'phone-pair' }, { action: 'phone-off' },
+      // k41: pairing or removing computers stays on the Mac: the phone server never runs these
+      { action: 'computers-list' }, { action: 'computers-add', name: 'PC', code: 'orca://pair?code=abc' }, { action: 'computers-remove', id: 'env-1' },
       { action: 'shell', cmd: 'ls' }, { action: '' }, {}, { action: ['stop'] }, { action: 'constructor' }, { action: 'toString' },
       { action: 'stop', id: 'zz' }, { action: 'stop', id: '-a1' }, { action: 'stop' }, { action: 'compact', id: 1 },
       { action: 'approve', id: true }, { action: 'approve', id: '5' }, { action: 'approve', id: 1.5 }, { action: 'approve', id: 0 },

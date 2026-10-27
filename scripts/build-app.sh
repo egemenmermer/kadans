@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds build/Kadans.app (menu bar shell) and copies it to ~/Applications/Kadans.app.
-# --no-install: build only, no copy to ~/Applications.
+# Builds build/Kadans.app (menu bar shell) and copies it to ~/Applications/Kadans.app
+# (KADANS_APPS_DIR overrides ~/Applications; `kadans setup` uses it).
+# --no-install: build only, no copy.
 # The repo path is baked into Info.plist (KadansRepo); KADANS_REPO overrides it at run time.
 # Nothing here starts at login: no login item, no launch agent.
 set -euo pipefail
@@ -16,6 +17,7 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/Kadans.app"
 LOCK="$HOME/.cache/kadans-heavy"
+APPS="${KADANS_APPS_DIR:-$HOME/Applications}"
 
 # swift build is a heavy job: one at a time across trees.
 mkdir -p "$HOME/.cache"
@@ -65,7 +67,7 @@ if [ "$INSTALL" = 0 ]; then
   echo "built $APP (repo: $ROOT); not installed (--no-install)"
   exit 0
 fi
-mkdir -p "$HOME/Applications"
-rm -rf "$HOME/Applications/Kadans.app"
-cp -R "$APP" "$HOME/Applications/Kadans.app"
-echo "built $APP (repo: $ROOT); copied to $HOME/Applications/Kadans.app"
+mkdir -p "$APPS"
+rm -rf "$APPS/Kadans.app"
+cp -R "$APP" "$APPS/Kadans.app"
+echo "built $APP (repo: $ROOT); copied to $APPS/Kadans.app"

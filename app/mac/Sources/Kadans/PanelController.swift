@@ -54,7 +54,12 @@ enum BridgeResult {
 /// Hosts app/web/panel.html and is the only bridge between the page and the CLI.
 final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
     static let width: CGFloat = 320
+    /// The sane cap (k42): never taller than this, whatever the screen.
     static let maxHeight: CGFloat = 560
+    /// k42: room kept free between the popover and the screen's visible bottom (arrow, gap under the menu bar, air).
+    static let screenMargin: CGFloat = 44
+    /// k42: the popover's height cap on the status item's screen: min(maxHeight, visible height under the menu bar - margin).
+    private(set) var cap: CGFloat = PanelController.maxHeight
 
     private(set) var webView: WKWebView!
     private let theme: String?
@@ -88,6 +93,8 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     var phone: Phone? {
         didSet { phone?.onChange = { [weak self] in self?.phoneChanged() } }
     }
+    /// k41: the owner's other computers (Settings › Computers). nil in snapshot mode: the computers actions are ignored.
+    var computers: Computers?
     /// k28: the page sent "settings" and the popover has not closed since. The page sends no "back" notice, so this
     /// stays true until the popover closes. While true, every refresh carries {phone} (and `devices --json` while on).
     private(set) var settingsOpen = false
@@ -121,6 +128,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     /// page starts out visible.)
     override func viewDidAppear() {
         super.viewDidAppear()
+        if let screen = view.window?.screen { fit(screen: screen) } // the popover's own screen, in case it moved
         if loaded { evaluate("window.kadans && window.kadans.visible && window.kadans.visible(true); true;") }
     }
 
@@ -131,6 +139,28 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     }
 
     /// One resize per burst of size reports (the page already waits for its own animations before it shrinks).
+    /// k42: the cap for a screen: what is visible under the menu bar (and above the Dock) minus a margin, at most
+    /// maxHeight, never below 240. No screen known: maxHeight.
+    static func cap(for screen: NSScreen?) -> CGFloat {
+        guard let vf = screen?.visibleFrame, vf.height > 0 else { return maxHeight }
+        return min(maxHeight, max(240, floor(vf.height - screenMargin)))
+    }
+
+    /// k42: fit the panel to the status item's screen (before the popover shows, on display changes). The page gets the
+    /// cap as its max height, so the gauge and the bottom bar stay on screen and only the agents area scrolls.
+    func fit(screen: NSScreen?) {
+        let c = Self.cap(for: screen)
+        guard c != cap else { return }
+        cap = c
+        if lastHeight > c { sizeFromPage(c) }
+        pushCap()
+    }
+
+    private func pushCap() {
+        guard loaded else { return }
+        evaluate("window.kadans && window.kadans.cap && window.kadans.cap(\(Int(cap))); true;")
+    }
+
     private func sizeFromPage(_ h: CGFloat) {
         let first = pendingHeight == nil
         pendingHeight = h
@@ -194,6 +224,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard !loaded else { return }
         loaded = true
+        if cap != Self.maxHeight { pushCap() }
         onLoaded?()
     }
 
@@ -220,6 +251,8 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         // k28: the device list while Settings is open: on every refresh while phone is on, else on full ones only.
         let wantDevices = phone != nil && settingsOpen && (full || phone?.on == true)
         let withPhone = phone != nil && (settingsOpen || full)
+        // k41: the computers list on full refreshes while Settings is open (its own queue: the status refresh never waits on it)
+        if full && settingsOpen { computers?.reload { [weak self] in self?.pushComputers() } }
         DispatchQueue.global(qos: .utility).async {
             let devices = wantDevices ? Phone.fetchDevices() : nil
             let s = CLI.run(["status", "--json"])
@@ -326,6 +359,20 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         if settingsOpen { pushPhone() }
     }
 
+    // MARK: computers (k41)
+
+    func pushComputers() {
+        guard loaded, !fixtureOnly, let p = computers?.payload() else { return }
+        push(p)
+    }
+
+    /// The list first, then how the action ended (the page reads the error code from the list payload).
+    private func computersDone(_ action: String, id: String, ok: Bool) {
+        pushComputers()
+        let r: [String: Any] = ["action": action, "id": id, "ok": ok, "why": ""]
+        if let js = BridgeResult.script(r) { evaluate(js) }
+    }
+
     // MARK: messages from the page
 
     /// A string id from the latest `agents --json` list that cannot be read as a flag.
@@ -398,7 +445,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         case "size":
             // UI only: fit the popover to the page.
             guard let h = (body["height"] as? NSNumber)?.doubleValue, h.isFinite, h > 0 else { return }
-            sizeFromPage(min(Self.maxHeight, max(60, ceil(CGFloat(h)))))
+            sizeFromPage(min(cap, max(60, ceil(CGFloat(h)))))
         case "close":
             onClose?()
         case "settings":
@@ -512,6 +559,27 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
             settingsOpen = true
             guard let id = phone.knownDevice(body["id"]) else { log("ignored phone-revoke: id is not in the current devices list"); return }
             phone.revoke(id) { [weak self] in self?.pushPhone() }
+        // k41: computers. The page's name and code are checked again here; the code goes to the CLI's stdin only and is
+        // never logged (this case logs nothing from the body). Remove takes only an id from the latest list.
+        case "computers-add":
+            guard let computers else { return }
+            settingsOpen = true
+            computers.add(name: body["name"], code: body["code"]) { [weak self] ok in
+                self?.computersDone("computers-add", id: "", ok: ok)
+                if ok { self?.refresh() } // the new computer's agents (the list itself came with the add)
+            }
+        case "computers-remove":
+            guard let computers else { return }
+            settingsOpen = true
+            guard let id = computers.known(body["id"]) else {
+                log("ignored computers-remove: id is not in the current computers list")
+                computersDone("computers-remove", id: "", ok: false)
+                return
+            }
+            computers.remove(id) { [weak self] ok in
+                self?.computersDone("computers-remove", id: id, ok: ok)
+                if ok { self?.refresh() }
+            }
         default:
             log("ignored action \"\(action)\" (not on the allow-list)")
         }

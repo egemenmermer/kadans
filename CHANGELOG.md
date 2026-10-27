@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.0 (2026-10-27)
+
+- One command to install and update: `npx kadans@latest setup` shows what it changes in Claude Code, asks first, then
+  builds the menu bar app. `npx kadans uninstall` removes it (`--all` also removes the app and Kadans' own data).
+- Agents list: drag rows into your own order and double-click a title to rename it. Each row shows its progress
+  (`3/5 · Writing tests` and a thin bar) and what its sub-agents spent.
+- Smart titles: Haiku names your own chats from what they are about now, a few calls per window, never in brake (off with
+  `kadans config set smartTitles false`).
+- Lean mode, on by default: short token-saving notes at session start, on re-reading an unchanged file and after very
+  large output. Notes only, never blocks.
+- Codex limits: if you use the Codex CLI, its limits show next to Claude's, read-only.
+- Other computers: agents on your paired Orca machines appear in the panel, grouped by machine.
+- Phone control: Settings › Phone shows a QR code; scan it on the same Wi-Fi or Tailscale and add Kadans to your Home
+  Screen. Pairing codes work once, within 10 minutes; phone tokens are stored hashed.
+- README: a short demo at the top.
+
 ## 1.0.0 (2026-10-27)
 
 First public release. Changes since 0.1.0:

@@ -363,7 +363,7 @@ test('panel: context number and compact hint for none / soon / now / null', () =
   const html = p.html();
   // none (working): the number, no tag; the lifetime sum only in the tooltip
   const none = rowHtml(html, 'fx-0024');
-  assert.equal(pvText(none), 'Quarry · Opus · 148k context · 40 min');
+  assert.equal(pvText(none), '40 min · 148k context · Quarry · Opus');
   assert.match(none, /<span class="cx"> · 148k context<\/span>/); // its own span: never cut by the ellipsis
   assert.doesNotMatch(none, /class="tag"/);
   assert.doesNotMatch(pvText(none), /2\.1M/);
@@ -371,7 +371,7 @@ test('panel: context number and compact hint for none / soon / now / null', () =
   // null: no number in that slot
   const nul = rowHtml(html, 'fx-0025');
   assert.doesNotMatch(nul, /\d+k context/);
-  assert.match(nul, /Fernway · Sonnet · 2 min/);
+  assert.match(nul, /2 min · Fernway · Sonnet/);
   // soon: the number is enough
   const soon = rowHtml(html, 'fx-0022');
   assert.match(soon, /92k context/);
@@ -429,7 +429,7 @@ test('panel: Compact confirms first, then sends exactly one compact with the id 
   const row = rowHtml(p.html(), 'fx-0021');
   // the question and its reason on the line under the row; the row keeps its meta line, without the tag
   assert.match(row, /<div class="cwhy" data-key="why:fx-0021"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
-  assert.equal(pvText(row), 'Idle 12 min · Tidepool · Opus · 152k context · 1 hr 35 min');
+  assert.equal(pvText(row), 'Idle 12 min · 152k context · Tidepool · Opus · 1 hr 35 min');
   assert.match(row, /data-do="compact-go" data-id="fx-0021">Compact<\/button>/);
   assert.match(row, /data-do="cancel" data-id="fx-0021">Cancel/);
   assert.equal(compacts(p).length, 0);
@@ -469,7 +469,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
   p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
   let html = p.html();
-  assert.match(pvText(rowHtml(html, 'fx-0021')), /^Compacting… · Tidepool/);
+  assert.match(pvText(rowHtml(html, 'fx-0021')), /^Compacting… · (\d+k context · )?Tidepool/);
   assert.doesNotMatch(rowHtml(html, 'fx-0021'), /class="tag"/);
   // no Compact anywhere while one is in flight, and a forged click is ignored
   assert.doesNotMatch(html, /data-do="compact"/);
@@ -632,13 +632,13 @@ test('panel: Compacted shows on the row once the context dropped after an accept
   p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
   p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
   p.window.kadans.result({ action: 'compact', id: 'fx-0021', ok: true, why: '' }); // the CLI typed it
-  assert.match(pvText(rowHtml(p.html(), 'fx-0021')), /Compacting… · Tidepool/);
+  assert.match(pvText(rowHtml(p.html(), 'fx-0021')), /Compacting… · (\d+k context · )?Tidepool/);
   assert.doesNotMatch(p.html(), /Compacted/);
   clock.now += 20_000;
   const smaller = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, context: { tokens: 21000, window: 200000, pct: 10.5, advice: 'none', why: null } } : a));
   p.window.kadans.render({ agents: smaller });
   let row = rowHtml(p.html(), 'fx-0021');
-  assert.match(pvText(row), /^Compacted · Tidepool · Opus · 21k context/);
+  assert.match(pvText(row), /^Compacted · 21k context · Tidepool · Opus/);
   assert.doesNotMatch(row, /Compacting…|class="warn"/);
   clock.now += 8_100;
   p.window.kadans.render({});
@@ -1475,7 +1475,7 @@ function arrangePanel(opts = {}) {
     button: 0, clientX: 100, clientY: y, ...more }));
   const doc = (type, e) => p.docListeners[type].forEach((fn) => fn({ pointerId: 1, clientX: 100, preventDefault() {}, type, ...e }));
   const hold = () => { const t = timers.find((x) => x.ms === 250 && !x.cleared && !x.ran); t.ran = true; t.fn(); };
-  const order = () => list.kids.map((k) => k.attrs.get('data-key'));
+  const order = () => list.kids.map((k) => k.attrs.get('data-key')).filter((k) => k !== undefined); // k42: not the Agents heading or Up next
   const reorders = () => JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'reorder'))); // out of the vm's realm
   const key = (e) => p.docListeners.keydown.forEach((fn) => fn({ preventDefault() {}, ...e }));
   // the drop's settle (spring) timer
@@ -1766,12 +1766,12 @@ test('k35: progress leads the meta line ("3/5 · Writing tests") with a bar unde
   const p = loadPanel();
   p.window.kadans.render(fixture(p, 'progress'));
   const html = p.html();
-  assert.match(html, /<span class="pn">3\/5<\/span><span class="ps"> · Writing tests<\/span><span class="pj"> · Tidepool<\/span>/);
+  assert.match(html, /<span class="pn">3\/5<\/span><span class="ps"> · Writing tests<\/span><span class="du"> · 11 min<\/span><span class="pj"> · Tidepool<\/span>/);
   assert.match(html, /<div class="pb" aria-hidden="true"><i style="transform:scaleX\(0\.6\)"><\/i><\/div>/);
-  assert.match(html, /aria-label="Brake hooks for the Stop event\. 3 of 5 done: Writing tests\. Tidepool/);
+  assert.match(html, /aria-label="Brake hooks for the Stop event\. 3 of 5 done: Writing tests\. 11 min · Tidepool/);
   // needs-you keeps its words first; a step-less count; 0/6 still draws the (empty) bar on its track
   assert.match(html, /<span class="ld"><span class="need">Needs you<\/span><\/span><span class="pn"> · 1\/3<\/span><span class="ps"> · Comparing/);
-  assert.match(html, /<span class="pn">0\/6<\/span><span class="pj"> · Marlin<\/span>/);
+  assert.match(html, /<span class="pn">0\/6<\/span><span class="du"> · 40 min<\/span><span class="pj"> · Marlin<\/span>/);
   assert.match(html, /<i style="transform:scaleX\(0\)"><\/i>/);
   // a row without progress: a hidden bar slot, no count
   const fern = html.slice(html.indexOf('data-key="row:fx-0003"'), html.indexOf('data-key="row:fx-0004"'));
@@ -1852,8 +1852,8 @@ test('k38: no empty meta part: a blank or separator-only part is dropped, so "Id
     const meta = /<div class="pv meta">(.*?)<\/div>/.exec(row)[1];
     assert.equal(meta, '<span class="ld">Idle 1 min</span>', `project ${JSON.stringify(project)}`);
   }
-  // and a squeezed part keeps room for " · X…" (CSS), never only its separator
-  assert.match(read('panel.css'), /\.pv\.meta > :is\(\.du, \.fm, \.pj, \.ps\) \{ min-width: 2\.6em; \}/);
+  // k42: parts are never squeezed (whole parts drop instead), so none can show only its separator (CSS)
+  assert.match(read('panel.css'), /\.pv\.meta > span \{ flex: none; white-space: pre; \}/);
 });
 
 test('k38: the phone page shows the other computers too, without actions', async () => {
@@ -1864,4 +1864,220 @@ test('k38: the phone page shows the other computers too, without actions', async
   await flush();
   assert.match(p.html(), /data-key="mh:other"/);
   assert.ok(!/data-id="remote:/.test(p.html()));
+});
+
+// ---------- k41: Settings › Computers ----------
+test('Settings › Computers: rows with status and agents, offline muted, remove with a confirm; hidden without a payload', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const open = (name) => {
+    p.window.kadans.reset();
+    p.window.kadans.render(F[name]);
+    F[name].after(p.document);
+    return p.html();
+  };
+  assert.ok(!open('settings').includes('Add a computer'), 'an older app sends no computers: no section');
+  let h = open('settings_computers');
+  assert.match(h, /<div class="gl">Computers<\/div>/);
+  assert.match(h, /<div>kasa<\/div><div class="d">online · 2 agents<\/div>/);
+  assert.match(h, /<div>studio<\/div><div class="d">not live · 1 agent<\/div>/);
+  assert.match(h, /<div class="it off"><div class="tx"><div>PC<\/div><div class="d">offline<\/div>/);
+  assert.match(h, /Add a computer/);
+  assert.ok(h.indexOf('>Computers<') > h.indexOf('>Notifications<'), 'below the other Mac-only groups');
+  p.tap({ do: 'comp-remove', id: 'env-0003' });
+  h = p.html();
+  assert.match(h, /Unpair it from this Mac\?/);
+  assert.equal(p.sent.filter((m) => m.action === 'computers-remove').length, 0, 'nothing sent before the confirm');
+  p.tap({ do: 'comp-keep' });
+  assert.ok(!p.html().includes('Unpair it'));
+  p.tap({ do: 'comp-remove', id: 'env-0003' });
+  p.tap({ do: 'comp-remove-go', id: 'env-0003' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'computers-remove', id: 'env-0003' });
+  assert.match(p.html(), /Removing…/);
+  p.window.kadans.render({ computers: { list: F.settings_computers.computers.list.slice(0, 2), error: null } });
+  p.window.kadans.result({ action: 'computers-remove', id: 'env-0003', ok: true, why: '' });
+  h = p.html();
+  assert.ok(!h.includes('>PC<') && !h.includes('Removing'));
+  // a failed remove: the page's own line, never the result's text
+  p.tap({ do: 'comp-remove', id: 'env-0002' });
+  p.tap({ do: 'comp-remove-go', id: 'env-0002' });
+  p.window.kadans.render({ computers: { list: F.settings_computers.computers.list.slice(0, 2), error: 'remove' } });
+  p.window.kadans.result({ action: 'computers-remove', id: 'env-0002', ok: false, why: 'kadans: orca says <b>secret</b>' });
+  h = p.html();
+  assert.match(h, /Couldn’t remove that computer\./);
+  assert.ok(!h.includes('secret'));
+  // list unreadable, and none yet
+  assert.match(open('settings_computers_error'), /Couldn’t read your computers\./);
+  assert.match(open('settings_computers_none'), /See the agents on your other computers here\./);
+});
+
+test('Settings › Computers: the add form sends the code once, clears the field at once, never draws it', () => {
+  const timers = [];
+  const p = loadPanel({ timers });
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render(F.settings_computers_add);
+  F.settings_computers_add.after(p.document); // clicks "Add…"
+  let h = p.html();
+  assert.match(h, /On the other computer run: <span class="code">npx\u00a0kadans\u00a0connect<\/span>/);
+  assert.match(h, /<input class="fld" type="text" data-key="comp-name" placeholder="PC" maxlength="32"/);
+  assert.match(h, /<input class="fld" type="password" data-key="comp-code" placeholder="[^"]*" aria-label="Pairing code" spellcheck="false" autocomplete="off"/);
+  assert.ok(!/data-key="comp-code"[^>]*value=/.test(h), 'the code field has no value attribute');
+  const CODE = 'orca://pair?code=FAKE_k41_panel_code';
+  const code = () => p.el.find('comp-code');
+  // a bad code: refused on the page, field cleared, nothing sent
+  code().value = 'orca://pair?code=a b"c';
+  p.tap({ do: 'comp-add' });
+  assert.equal(code().value, '');
+  assert.equal(p.sent.filter((m) => m.action === 'computers-add').length, 0);
+  assert.match(p.html(), /That is not a pairing code\./);
+  // a refresh while typing keeps the field node
+  const nameNode = p.el.find('comp-name');
+  code().value = `  ${CODE}\n`;
+  p.window.kadans.render({ computers: F.settings_computers_add.computers });
+  assert.equal(p.el.find('comp-name'), nameNode);
+  p.tap({ do: 'comp-add' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'computers-add', name: 'PC', code: CODE }, 'empty name: the placeholder PC');
+  assert.equal(code().value, '', 'cleared after submit');
+  h = p.html();
+  assert.match(h, /Adding…/);
+  assert.ok(!h.includes('FAKE_k41'), 'the code is never in the markup');
+  assert.ok(!JSON.stringify(p.window.kadans).includes('FAKE_k41'));
+  // a failed add: the app's error code -> the page's line; the form stays, the field stays empty
+  p.window.kadans.render({ computers: { list: F.settings_computers_add.computers.list, error: 'add' } });
+  p.window.kadans.result({ action: 'computers-add', id: '', ok: false, why: CODE });
+  h = p.html();
+  assert.match(h, /Couldn’t add it\. Each code works once/);
+  assert.ok(!h.includes('FAKE_k41'));
+  assert.equal(code().value, '');
+  // try again with a name: ok closes the form, the new row comes with the list
+  p.el.find('comp-name').value = 'Work PC';
+  code().value = CODE;
+  p.tap({ do: 'comp-add' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'computers-add', name: 'Work PC', code: CODE });
+  p.window.kadans.render({ computers: { list: [...F.settings_computers_add.computers.list, { id: 'env-9', name: 'Work PC', status: 'unknown', agents: null }], error: null } });
+  p.window.kadans.result({ action: 'computers-add', id: '', ok: true, why: '' });
+  h = p.html();
+  assert.ok(!h.includes('comp-code'), 'the form closed');
+  assert.match(h, /<div>Work PC<\/div><div class="d">not checked yet<\/div>/);
+  // a bad name
+  p.tap({ do: 'comp-open' });
+  p.el.find('comp-name').value = '--json';
+  code().value = CODE;
+  p.tap({ do: 'comp-add' });
+  assert.equal(code().value, '');
+  assert.match(p.html(), /Use letters, digits, spaces or dashes/);
+  assert.equal(p.sent.filter((m) => m.action === 'computers-add').length, 2);
+});
+
+test('Settings › Computers: hostile names and error codes stay text; the phone page never shows the section', async () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  const evil = { list: [{ id: 'e"><img src=x onerror=alert(1)>', name: '<img src=x onerror=alert(1)>', status: '<b>', agents: '2' },
+    { id: 'ok', name: 'a&b', status: 'online', agents: -1 }, null, { id: 7, name: 'x' }], error: 'constructor' };
+  p.window.kadans.render(Object.assign({}, F.settings_computers, { computers: evil }));
+  F.settings_computers.after(p.document);
+  const h = p.html();
+  assertNoInjection(h, 'computers hostile');
+  assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(h, /<div>a&amp;b<\/div><div class="d">online<\/div>/);
+  p.window.kadans.result({ action: 'computers-add', id: '', ok: false, why: 'x' });
+  assert.ok(!p.html().includes('[object') && !p.html().includes('native code'));
+  // the phone (http) page: no Computers section even with a payload
+  const store = new Map([['kadans.token', 't']]);
+  const q = loadPanel({ http: { fetch: async () => ({ status: 200, ok: true, json: async () => ({}) }), store } });
+  q.window.kadans.render(Object.assign({}, F.settings_computers, { computers: { list: [{ id: 'a', name: 'kasa', status: 'online', agents: 1 }], error: null } }));
+  q.tap({ do: 'settings' });
+  assert.ok(!q.html().includes('Add a computer'));
+});
+
+// ---------- k42: fit on one screen, whole meta parts, useful remote rows ----------
+test('k42: the gauge and the bottom bar sit outside the scroll area; Agents, other computers and Up next inside it', () => {
+  const p = loadPanel();
+  p.window.kadans.render(fixture(p, 'fit'));
+  const panel = p.el.kids[0];
+  const kids = panel.kids.map((k) => k.attrs.get('class'));
+  assert.deepEqual(kids, ['card', 'list', 'bottom'], 'the panel is gauge, one scroll area, bottom bar');
+  const list = panel.kids[1];
+  assert.equal(list.attrs.get('id'), 'k-list');
+  const inner = list.innerHTML;
+  for (const part of ['<div class="sh"><span>Agents</span>', 'data-key="row:fx-0401"', 'data-key="sub:fx-sub-42"', 'data-key="mh:other"',
+    'data-key="row:remote:other:tab-1:1"', '<div class="upnext">']) assert.ok(inner.includes(part), part);
+  assert.ok(!inner.includes('class="bottom"') && !inner.includes('class="card"'));
+  // CSS: only the list gives way; the panel's height is the host's cap
+  const css = read('panel.css');
+  assert.match(css, /\.panel \{[^}]*max-height: var\(--cap, 560px\)/);
+  assert.match(css, /\.panel > \* \{ flex: none; \}/);
+  assert.match(css, /\.list \{ position: relative; flex: 0 1 auto; min-height: 0; overflow-y: auto;/);
+  // no agents: the heading and the empty note are still in the scroll area, the bar outside
+  const d = fixture(p, 'fit');
+  d.agents = [];
+  p.window.kadans.reset();
+  p.window.kadans.render(d);
+  assert.deepEqual(p.el.kids[0].kids.map((k) => k.attrs.get('class')), ['card', 'list', 'bottom']);
+});
+
+test('k42: the host sets the cap (--cap) and the page reports its size again; nonsense is ignored', () => {
+  const p = loadPanel();
+  const set = [];
+  p.document.documentElement.style = { setProperty: (k, v) => set.push([k, v]) };
+  p.window.kadans.render(fixture(p, 'fit'));
+  p.window.kadans.cap(431.6);
+  p.window.kadans.cap('x');
+  p.window.kadans.cap(-5);
+  assert.deepEqual(set, [['--cap', '432px']]);
+});
+
+test('k42: the meta line holds whole parts in order of need: state and time lead, model and project go first', () => {
+  const p = loadPanel();
+  p.window.kadans.render(fixture(p, 'fit'));
+  const html = p.html();
+  const parts = (id) => [.../<div class="pv meta">(.*?)<\/div>/.exec(rowHtml(html, id))[1].matchAll(/<span class="(\w+)">/g)].map((m) => m[1]);
+  assert.deepEqual(parts('fx-0401'), ['du', 'cx', 'pj', 'fm']); // working: its age first
+  assert.deepEqual(parts('fx-0402'), ['ld', 'cx', 'pj', 'fm', 'du']); // idle: "Idle 7 min" carries the time; the age last
+  assert.equal(pvText(rowHtml(html, 'fx-0402')), 'Idle 7 min · 106k context · Tidepool-website-redesign · Sonnet · 4 hr');
+  // CSS: one line, parts never squeezed: what does not fit wraps out of sight with everything after it
+  const css = read('panel.css');
+  assert.match(css, /\.pv\.meta \{ display: flex; flex-wrap: wrap; height: 1\.35em; line-height: 1\.35em; overflow: hidden; \}/);
+  assert.match(css, /\.pv\.meta > span \{ flex: none; white-space: pre; \}/);
+  assert.doesNotMatch(css, /\.pv\.meta[^{]*\{[^}]*flex-grow/, 'no squeeze ladder left');
+  assert.doesNotMatch(css, /\.pv\.meta[^{]*\{[^}]*min-width: 2\.6em/);
+});
+
+test('k42: a remote row says what it does: "Working 1 hr 10 min · Claude · PowerShell · 1 sub-agent · project", blob moving', () => {
+  const p = loadPanel();
+  const d = fixture(p, 'fit');
+  p.window.kadans.render(d);
+  const row = rowHtml(p.html(), 'remote:other:tab-1:1');
+  assert.equal(pvText(row), 'Working 1 hr 10 min · Claude · PowerShell · 1 sub-agent · Fernway');
+  assert.match(row, /<div class="nm">Make the rain sound loop without a gap<\/div>/);
+  assert.match(row, /class="bw bw-work"/, 'the blob moves like a local working row');
+  // needs you: no tool; a Codex agent; no sub-agents
+  Object.assign(d.agents[2], { status: 'needs-you', stateSince: d.status.now - 5 * 60000, agentType: 'codex', subagentCount: 0 });
+  p.window.kadans.render(d);
+  assert.equal(pvText(rowHtml(p.html(), 'remote:other:tab-1:1')), 'Needs you 5 min · Codex · Fernway');
+});
+
+test('k42: the prompt title is kept in page memory only: cached runs keep it, a stale or offline machine falls back', () => {
+  const p = loadPanel();
+  const d = fixture(p, 'fit');
+  const id = 'remote:other:tab-1:1';
+  const name = () => /<div class="nm">(.*?)<\/div>/.exec(rowHtml(p.html(), id))[1];
+  p.window.kadans.render(d);
+  assert.equal(name(), 'Make the rain sound loop without a gap');
+  Object.assign(d.agents[2], { title: null, titleSource: null }); // a run inside the 10 s gap: no prompt title
+  p.window.kadans.render(d);
+  assert.equal(name(), 'Make the rain sound loop without a gap');
+  Object.assign(d.agents[2], { title: 'fix-sound', titleSource: 'branch' });
+  p.window.kadans.render(d);
+  assert.equal(name(), 'Make the rain sound loop without a gap', 'the prompt beats the branch');
+  d.agents[2].machineStale = true;
+  p.window.kadans.render(d);
+  assert.equal(name(), 'fix-sound', 'stale: the memory is dropped');
+  d.agents[2].machineStale = false;
+  Object.assign(d.agents[2], { title: null, titleSource: null });
+  p.window.kadans.render(d);
+  assert.equal(name(), 'Session in Fernway');
+  assert.ok(!JSON.stringify(p.sent).includes('rain sound'), 'never sent to the host');
 });

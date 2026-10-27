@@ -124,11 +124,15 @@ test('cli install previews by default, --apply backs up, uninstall restores', ()
   assert.deepEqual(JSON.parse(readFileSync(sb.file, 'utf8')), FIXTURE);
 });
 
-test('cli install warns when the chained script is not the old status line', () => {
+test('cli install: the old status line keeps running (no WARNING); an explicit other chain warns', () => {
   const sb = sandbox();
-  assert.doesNotMatch(run(sb, ['install']).out, /WARNING/); // default chain = the fixture's old script
+  const out = run(sb, ['install']).out;
+  assert.match(out, /^Your status line '~\/\.claude\/usage-guard\/statusline\.sh' keeps running inside Kadans' line\.$/m);
+  assert.doesNotMatch(out, /WARNING/);
+  writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ chain: '~/.claude/usage-guard/statusline.sh' }));
+  assert.doesNotMatch(run(sb, ['install']).out, /WARNING/); // chain = the old script: same thing
   writeFileSync(join(sb.home, 'config.json'), JSON.stringify({ chain: '/elsewhere/other.sh' }));
-  assert.match(run(sb, ['install']).out, /WARNING: the old statusLine "~\/\.claude\/usage-guard\/statusline\.sh"/);
+  assert.match(run(sb, ['install']).out, /WARNING: your status line '~\/\.claude\/usage-guard\/statusline\.sh' does not run/);
 });
 
 test('cli install refuses a broken settings.json and writes nothing', () => {

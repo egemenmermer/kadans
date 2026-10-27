@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // kadans: pace Claude Code usage limits and list running agents. Commands: see HELP.
 import { spawnSync } from 'node:child_process';
-import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir, networkInterfaces } from 'node:os';
 import { isIPv4 } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -16,26 +16,36 @@ import { notifyBrakeOnce, runPretool, runStop } from '../lib/hooks.mjs';
 import { runLean } from '../lib/lean.mjs';
 import { notify } from '../lib/notify.mjs';
 import { kadansCommand, plan } from '../lib/install.mjs';
+import { chainTarget, joinLines, runChained, savedStatusLine, shortCommand, userCommand } from '../lib/chain.mjs';
+import { NO_TOOLCHAIN, WIN_APP_LINE, appRoot, applySetup, appsDir, currentBin, hasToolchain, installedVersion, isNpxCache, packageVersion, stableBin, versionCmp } from '../lib/setup.mjs';
 import { configView, setSetting } from '../lib/config.mjs';
 import { remoteCaller } from '../lib/remote.mjs';
+import { ERR as COMPUTER_ERR, addComputer, listComputers, readStdin, removeComputer } from '../lib/computers.mjs';
 import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, readCache, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
 import { refresh as refreshTitles, triggerRefresh } from '../lib/smart-titles.mjs';
 import { setTitle } from '../lib/titles.mjs';
 import { ORDER_MAX, setOrder } from '../lib/order.mjs';
 import { MODE_OF, clearAutoPause, ownKey, parseUntil, runPacePost, runPacePre, setAutopace, setPace, windowOf } from '../lib/pace-control.mjs';
 import { checkStartable, describePlan, replaceAgent, startPlan, startTask } from '../lib/launch.mjs';
-import { fetchUsage, readUsageState, renderUsage, usageJson } from '../lib/usage-api.mjs';
+import { MAC_ONLY_NOTE, fetchUsage, readUsageState, renderUsage, usageApiSupported, usageJson } from '../lib/usage-api.mjs';
 import { renderTick, runTick, tickJson } from '../lib/autogas.mjs';
 import { listDevices, newPairCode, revokeDevice } from '../lib/phone.mjs';
 import { DEFAULT_PORT, clearServeInfo, cliRunner, createPhoneServer, pickHost, readServeInfo, writeServeInfo } from '../lib/serve.mjs';
 import { stripControl } from '../lib/text.mjs';
+import { onPath as findOnPath, isWin as isWinPlatform } from '../lib/platform.mjs';
+import { runConnect } from '../lib/connect.mjs';
 import { KICKOFF_ARGV, applySchedule, decide, describeSchedule, kickoffEnv, readKickoffState, runKickoff, schedulePlan } from '../lib/kickoff.mjs';
 
 const HELP = `kadans: pace Claude Code usage limits
 
 Usage:
+  kadans setup [--yes] [--no-app] [--no-open]   install or update Kadans: copies it to ~/.kadans/app, adds the
+                      Claude Code hooks (preview first, asks before writing; --yes: no question) and builds the menu
+                      bar app into ~/Applications (--no-app: skip it; --no-open: do not restart it). Run it again to update:
+                      npx kadans@latest setup
   kadans statusline   read the status line payload on stdin, record a sample,
-                      run the chained status line (output dropped), print one line
+                      run your previous status line (its output follows Kadans' line; config.json
+                      "chain": a script to run instead, output dropped; "" = none), print the line
   kadans status [--json]   show every recorded account (--json: the panel's data)
   kadans codex sync [--json]   read Codex CLI limits from ~/.codex/sessions (read-only; shown, never acted on)
   kadans project add <name> <path> [--importance high|normal|low]   (proje ekle, --onem)
@@ -92,13 +102,21 @@ Usage:
                       needs config phone true; prints {"url","host","port","pid"}, runs until SIGTERM
   kadans pair [--json]   a one-time pair link for a phone (needs a running serve; valid 10 min, one use)
   kadans devices [--json]   paired phones; kadans devices revoke <id> unpairs one at once
+  kadans connect [--name <name>]   on another computer (Windows too): runs \`orca serve\` here and shows the code
+                      to paste on your Mac (Kadans › Settings › Computers › Add); Ctrl+C stops it
+  kadans computers [--json]   paired computers (Orca environments): name, id, online/stale/offline, agents
+  kadans computers add --name <name>   pair one: the code that \`kadans connect\` printed on the other computer
+                      comes on stdin only (pbpaste | kadans computers add --name PC); never echoed or stored
+  kadans computers remove <id>   unpair one
   kadans install [--apply] [--json]   preview (or write, with backup) settings.json changes
-  kadans uninstall [--apply] preview (or write, with backup) removing them
+  kadans uninstall [--apply] [--all]   preview (or write, with backup) removing them; --all also removes setup's
+                      copy (~/.kadans/app) and ~/Applications/Kadans.app, and asks before deleting your data
   kadans --help       show this help
 
 Environment:
   KADANS_HOME         data and config dir (default ~/.kadans); config in config.json
   CLAUDE_CONFIG_DIR   Claude config dir of the account to record (default ~/.claude)
+  KADANS_APPS_DIR     where setup installs Kadans.app (default ~/Applications)
   KADANS_THROTTLE=1   session opt-in for the Stop-hook throttle (also needs accounts.<key>.gas in config)
   KADANS_ALLOW=1      let spawning tools through while the brake is on
   KADANS_ORCA=0       do not ask the orca CLI for its agent terminals (KADANS_ORCA_BIN: path to the orca binary)
@@ -106,17 +124,6 @@ Environment:
 
 function expandHome(p) {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
-}
-
-// Pipes the same stdin to the chained script and drops its stdout and stderr.
-function runChain(cfg, raw) {
-  const chain = expandHome(cfg.chain);
-  try {
-    accessSync(chain, constants.X_OK);
-  } catch {
-    return;
-  }
-  spawnSync(chain, [], { input: raw, stdio: ['pipe', 'ignore', 'ignore'], timeout: 5000 });
 }
 
 function statusline(env) {
@@ -145,23 +152,24 @@ function statusline(env) {
     // recording must never break the status line; on a lock timeout the gauge is shown from what is on disk
     lockBusy = e?.message === 'kadans: lock timeout';
   }
+  let theirs = '';
   try {
-    runChain(cfg, raw);
+    theirs = runChained(chainTarget(cfg, home), raw, { env });
   } catch {
     // the chained script must never break the status line
   }
   try {
     const samples = readSamples(home, key);
-    if (samples.length === 0) return '';
+    if (samples.length === 0) return theirs;
     const res = overall(samples, now, cfg);
     try {
       if (!lockBusy) notifyBrakeOnce(home, cfg, key, res); // it needs the lock too: skip rather than wait again
     } catch {
       // notifications must never break the status line
     }
-    return renderLine(res, now, cfg.lang);
+    return joinLines(renderLine(res, now, cfg.lang), theirs);
   } catch {
-    return '';
+    return theirs;
   }
 }
 
@@ -191,16 +199,7 @@ function limitJson(l) {
 }
 
 function onPath(env, name) {
-  for (const dir of String(env.PATH ?? '').split(':')) {
-    if (!dir) continue;
-    try {
-      accessSync(join(dir, name), constants.X_OK);
-      return true;
-    } catch {
-      // not here
-    }
-  }
-  return false;
+  return findOnPath(name, env.PATH ?? env.Path, { pathExt: env.PATHEXT }) !== null;
 }
 
 // Queued tasks, best first: ready = approved queued tasks; next = the top 3 for "Up next"; startable = top 5 approved.
@@ -242,7 +241,7 @@ function statusJson(env, now = Date.now()) {
     // The usage endpoint reader (lib/usage-api.mjs): times and a short code only, no token.
     const ua = readUsageState(home);
     out.usageApi = {
-      enabled: cfg.usageApi === true,
+      enabled: cfg.usageApi === true && usageApiSupported(),
       lastOk: Number(ua.lastOk) || null,
       lastError: typeof ua.lastError === 'string' ? ua.lastError : null,
       nextAt: Number(ua.nextAt) > now ? Number(ua.nextAt) : null,
@@ -301,6 +300,7 @@ function status(args, env) {
   const cfg = loadConfig(home);
   const now = Date.now();
   if (codexEnabled(cfg, env)) syncCodex(home, env, { cfg, now });
+  if (process.platform === 'win32') process.stdout.write(`${MAC_ONLY_NOTE}; the status line still records usage\n`);
   const accounts = listAccounts(home);
   if (accounts.length === 0) {
     process.stdout.write('no accounts recorded yet\n');
@@ -319,7 +319,7 @@ function status(args, env) {
 }
 
 // Splits argv into positional words and --flags (--name value or --name=value; known switches take no value).
-const SWITCHES = new Set(['urgent', 'week', 'idle', 'acil', 'hafta', 'bos', 'all', 'hepsi', 'approved', 'onayli', 'apply', 'uygula', 'json', 'dry-run', 'force-dev']);
+const SWITCHES = new Set(['urgent', 'week', 'idle', 'acil', 'hafta', 'bos', 'all', 'hepsi', 'approved', 'onayli', 'apply', 'uygula', 'json', 'dry-run', 'force-dev', 'yes', 'no-app', 'no-open']);
 function parseArgs(args) {
   const pos = [];
   const flags = {};
@@ -628,11 +628,50 @@ ${agent.id}: ${r.how}
   return 0;
 }
 
-function installCmd(kind, args, env) {
+// The preview lines shared by install and setup.
+function printPlan(r, kind, home) {
+  if (!r.changed) {
+    process.stdout.write(`no changes: ${r.file}\n`);
+    return;
+  }
+  process.stdout.write(`${r.file}\n${r.diff}\n`);
+  for (const c of r.changes) process.stdout.write(`${c.kind === 'add' ? 'adds' : 'removes'} ${c.event} ${c.hook}: ${c.summary}\n`);
+  if (r.repointed) process.stdout.write(`moves ${r.repointed} existing Kadans hook${r.repointed === 1 ? '' : 's'} to the new path\n`);
+  if (kind === 'install') {
+    const cfg = loadConfig(home);
+    const old = userCommand(r.oldStatusLine) ?? userCommand(savedStatusLine(home));
+    if (typeof cfg.chain === 'string' && cfg.chain) {
+      process.stdout.write(`note: kadans statusline also runs config.json "chain": ${cfg.chain} (its output is not shown)\n`);
+      if (old && expandHome(old.trim()) !== expandHome(cfg.chain)) {
+        process.stdout.write(`WARNING: your status line '${shortCommand(old)}' does not run: config.json "chain" runs "${cfg.chain}" instead. Remove "chain" from config.json to keep your own line.\n`);
+      }
+    } else if (cfg.chain === null && old) {
+      process.stdout.write(`Your status line '${shortCommand(old)}' keeps running inside Kadans' line.\n`);
+    }
+  }
+}
+
+const interactive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+// "<question> [y/N]" on a terminal; anything but y/yes is no.
+async function ask(question) {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim());
+  } finally {
+    rl.close();
+  }
+}
+
+async function installCmd(kind, args, env) {
   const { flags } = parseArgs(args);
   const apply = Boolean(flags.apply || flags.uygula);
-  const bin = fileURLToPath(import.meta.url);
   const home = kadansHome(env);
+  const bin = stableBin(fileURLToPath(import.meta.url), home);
+  if (kind === 'install' && apply && isNpxCache(bin)) {
+    return fail("this copy runs from npx's cache, which npm cleans; hooks pointing here would break. Run instead: npx kadans@latest setup");
+  }
   const r = plan({ kind, cfgDir: configDir(env), home, bin, apply });
   if (flags.json) {
     // The app shows the summaries only; the diff (with paths) stays in the plain preview.
@@ -645,22 +684,86 @@ function installCmd(kind, args, env) {
     const there = existsSync(sch.file);
     process.stdout.write(`note: the kickoff schedule (launchd) is separate${there ? `; found ${sch.file}` : ' (not found)'}. Remove it with: kadans kickoff unschedule --apply\n`);
   }
-  if (!r.changed) {
-    process.stdout.write(`no changes: ${r.file}\n`);
+  printPlan(r, kind, home);
+  if (r.changed) {
+    if (apply) process.stdout.write(`written${r.backup ? `; backup: ${r.backup}` : ''}\n`);
+    else process.stdout.write(`preview: nothing written. To apply: kadans ${kind} --apply${flags.all ? ' --all' : ''}\n`);
+  }
+  if (kind === 'uninstall') return removeFiles(home, env, apply, Boolean(flags.all));
+  return 0;
+}
+
+// uninstall: setup's copy (<home>/app) and Kadans.app go only with --all --apply; the data store only after a yes on
+// a terminal. Without --all: say how.
+async function removeFiles(home, env, apply, all) {
+  const runtime = appRoot(home);
+  const app = join(appsDir(env), 'Kadans.app');
+  const found = [runtime, app].filter((p) => existsSync(p));
+  if (!all) {
+    if (found.length) process.stdout.write(`note: also installed by setup: ${found.join(', ')}. Remove with: kadans uninstall --apply --all (asks before deleting your data in ${home})\n`);
     return 0;
   }
-  process.stdout.write(`${r.file}\n${r.diff}\n`);
-  for (const c of r.changes) process.stdout.write(`${c.kind === 'add' ? 'adds' : 'removes'} ${c.event} ${c.hook}: ${c.summary}\n`);
-  if (kind === 'install') {
-    const cfg = loadConfig(home);
-    process.stdout.write(`note: kadans statusline chains the previous script: ${cfg.chain} (config.json "chain")\n`);
-    const old = r.oldStatusLine?.command;
-    if (old && expandHome(old.trim()) !== expandHome(cfg.chain)) {
-      process.stdout.write(`WARNING: the old statusLine "${old}" differs from the chained script "${cfg.chain}"; point config.json "chain" at the old script, otherwise the old script (Orca forwarding) will not run.\n`);
+  if (!apply) {
+    process.stdout.write(`--all would also remove: ${found.length ? found.join(', ') : '(nothing found)'}; it asks before deleting your data in ${home}\n`);
+    return 0;
+  }
+  for (const p of found) {
+    rmSync(p, { recursive: true, force: true });
+    process.stdout.write(`removed ${p}\n`);
+  }
+  if (found.includes(app)) process.stdout.write('If Kadans is still in the menu bar, quit it there: its files are gone.\n');
+  if (!existsSync(home)) return 0;
+  if (interactive() && (await ask(`Also delete your Kadans data (usage samples, tasks, settings) in ${home}?`))) {
+    rmSync(home, { recursive: true, force: true });
+    process.stdout.write(`removed ${home}\n`);
+  } else {
+    process.stdout.write(`kept your data in ${home}. To delete it too: rm -rf '${home.replace(/'/g, "'\\''")}'\n`);
+  }
+  return 0;
+}
+
+// `kadans setup`: see lib/setup.mjs. Preview, ask (or --yes), then copy, hooks, app, restart, summary.
+async function setupCmd(args, env, platform = process.platform) {
+  const { flags } = parseArgs(args);
+  const home = kadansHome(env);
+  const version = packageVersion();
+  const had = installedVersion(home);
+  const bin = currentBin(home);
+  const cfgDir = configDir(env);
+  const r = plan({ kind: 'install', cfgDir, home, bin, repoint: true, platform });
+  const win = isWinPlatform(platform);
+  const wantApp = !flags['no-app'];
+  const toolchain = wantApp && !win && hasToolchain(env);
+  const apps = appsDir(env);
+
+  const step = !had ? `copies Kadans ${version} to ${appRoot(home)}/${version}`
+    : had === version ? `refreshes Kadans ${version} in ${appRoot(home)}/${version}`
+      : `updates Kadans ${had} -> ${version}${versionCmp(version, had) < 0 ? ' (older than the installed one)' : ''} in ${appRoot(home)}/${version}`;
+  process.stdout.write(`Kadans setup\n\n1. ${step}; ${appRoot(home)}/current points at it\n\n2. Claude Code hooks, run from ${bin}:\n`);
+  printPlan(r, 'install', home);
+  process.stdout.write(`\n3. menu bar app: ${win ? WIN_APP_LINE : !wantApp ? 'skipped (--no-app)' : toolchain ? `builds and installs ${join(apps, 'Kadans.app')}` : NO_TOOLCHAIN}\n\n`);
+
+  if (!flags.yes) {
+    if (!interactive()) {
+      process.stdout.write('Preview only: nothing changed. To apply: npx kadans@latest setup --yes\n');
+      return 0;
+    }
+    if (!(await ask('Apply?'))) {
+      process.stdout.write('Nothing changed.\n');
+      return 0;
     }
   }
-  if (apply) process.stdout.write(`written${r.backup ? `; backup: ${r.backup}` : ''}\n`);
-  else process.stdout.write(`preview: nothing written. To apply: kadans ${kind} --apply\n`);
+
+  const { rt, w, appLine } = applySetup({ home, cfgDir, version, platform, env, wantApp, toolchain, open: !flags['no-open'] });
+  const undo = 'npx kadans@latest uninstall --apply --all';
+  process.stdout.write(`\nKadans ${version} is set up.\n`
+    + `  files:  ${rt.dir}${rt.previous && rt.previous !== version ? ` (was ${rt.previous})` : ''}${rt.removed.length ? `; removed old ${rt.removed.join(', ')}` : ''}\n`
+    + `  hooks:  ${w.changed ? `${w.file} updated${w.backup ? `; backup ${w.backup}` : ''}` : `${w.file} already up to date`}\n`
+    + `  app:    ${appLine}\n`
+    + `  update: npx kadans@latest setup\n`
+    + `  undo:   ${undo} (asks before deleting your data)\n`);
+  if (win) process.stdout.write('Next: npx kadans connect (pairs this computer with Kadans on your Mac)\n');
+  else if (wantApp && !toolchain) process.stdout.write(`${NO_TOOLCHAIN}\n`);
   return 0;
 }
 
@@ -716,7 +819,8 @@ function kickoffCmd(args, env) {
   const home = kadansHome(env);
   const sub = pos[0];
   if (sub === 'schedule' || sub === 'unschedule') {
-    const p = schedulePlan(sub, { env, bin: fileURLToPath(import.meta.url) });
+    if (process.platform !== 'darwin') return fail('kickoff schedule uses launchd: macOS only for now');
+    const p = schedulePlan(sub, { env, bin: stableBin(fileURLToPath(import.meta.url), home) });
     if (!flags.apply) {
       process.stdout.write(`${describeSchedule(p)}preview: nothing written. To apply: kadans kickoff ${sub} --apply\n`);
       return 0;
@@ -774,7 +878,7 @@ async function usageCmd(args, env) {
   const home = kadansHome(env);
   const r = await fetchUsage(home, { cfg: loadConfig(home) });
   process.stdout.write(flags.json ? `${JSON.stringify(usageJson(r))}\n` : `${renderUsage(r)}\n`);
-  return r.ok || ['off', 'too_soon', 'backoff', 'no_token', 'busy'].includes(r.code) ? 0 : 1;
+  return r.ok || ['off', 'too_soon', 'backoff', 'no_token', 'busy', 'mac_only'].includes(r.code) ? 0 : 1;
 }
 
 // `kadans codex sync [--json]`: Codex CLI limits from its session logs, read-only. Percentages only.
@@ -856,6 +960,43 @@ function devicesCmd(args, env) {
   return 0;
 }
 
+// `kadans computers [--json]`, `kadans computers add --name <name>` (code on stdin), `kadans computers remove <id>` (k41).
+// Errors are the fixed strings in lib/computers.mjs; the pairing code never reaches stdout, stderr or a file.
+async function computersCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  const home = kadansHome(env);
+  const call = remoteCaller(env);
+  if (pos[0] === 'add') {
+    // the code never comes as an argument (argv shows in `ps`): any extra word or code flag is refused unread
+    if (pos.length !== 1 || typeof flags.name !== 'string' || Object.keys(flags).some((f) => f !== 'name' && f !== 'json')) return fail('usage: pbpaste | kadans computers add --name <name> [--json]');
+    const code = readStdin();
+    if (code === null) return fail(COMPUTER_ERR.tty);
+    const r = await addComputer(home, { call, name: flags.name, code });
+    if (!r.ok) return fail(r.why);
+    process.stdout.write(flags.json ? `${JSON.stringify(r.computer)}\n` : `added ${r.computer.name}\n`);
+    return 0;
+  }
+  if (pos[0] === 'remove' || pos[0] === 'rm') {
+    if (pos.length !== 2) return fail('usage: kadans computers remove <id>');
+    const r = await removeComputer(home, { call, id: pos[1] });
+    if (!r.ok) return fail(r.why);
+    process.stdout.write(flags.json ? `${JSON.stringify({ removed: pos[1] })}\n` : `removed ${pos[1]}\n`);
+    return 0;
+  }
+  if (pos.length) return fail('usage: kadans computers [--json] | computers add --name <name> | computers remove <id>');
+  const r = await listComputers(home, { call, live: loadConfig(home).remoteAgents !== false });
+  if (!r.ok) return fail(r.why);
+  if (flags.json) process.stdout.write(`${JSON.stringify(r.list)}\n`);
+  else if (!r.list.length) process.stdout.write('no paired computers (on the other computer run: npx kadans connect)\n');
+  else {
+    for (const c of r.list) {
+      const n = c.agents === null ? '' : ` · ${c.agents} ${c.agents === 1 ? 'agent' : 'agents'}`;
+      process.stdout.write(`${c.id}  ${c.name} · ${c.status}${n}\n`);
+    }
+  }
+  return 0;
+}
+
 function main(argv, env = process.env) {
   const cmd = argv[0];
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') {
@@ -880,7 +1021,8 @@ function main(argv, env = process.env) {
     if (cmd === 'approve' || cmd === 'onayla') return taskCmd('approve', argv.slice(1), env);
     if (cmd === 'agents') return agentsCmd(argv.slice(1), env).catch((e) => fail(e.message));
     if (cmd === 'agent') return agentCmd(argv[1], argv.slice(2), env);
-    if (cmd === 'install' || cmd === 'uninstall') return installCmd(cmd, argv.slice(1), env);
+    if (cmd === 'setup') return setupCmd(argv.slice(1), env).catch((e) => fail(e.message));
+    if (cmd === 'install' || cmd === 'uninstall') return installCmd(cmd, argv.slice(1), env).catch((e) => fail(e.message));
     if (cmd === 'autopace') return autopaceCmd(argv.slice(1), env);
     if (cmd === 'config') return configCmd(argv[1], argv.slice(2), env);
     if (cmd === 'kickoff') return kickoffCmd(argv.slice(1), env);
@@ -889,6 +1031,8 @@ function main(argv, env = process.env) {
     if (cmd === 'serve') return serveCmd(argv.slice(1), env);
     if (cmd === 'pair') return pairCmd(argv.slice(1), env);
     if (cmd === 'devices') return devicesCmd(argv.slice(1), env);
+    if (cmd === 'connect') return runConnect(argv.slice(1), { env });
+    if (cmd === 'computers') return computersCmd(argv.slice(1), env).catch(() => fail(COMPUTER_ERR.list));
   } catch (e) {
     return fail(e.message);
   }

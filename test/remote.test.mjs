@@ -10,10 +10,11 @@ import { REMOTE_GAP_MS, REMOTE_OFFLINE_MS, REMOTE_STALE_MS, mapRemote, readRemot
 
 const NOW = 1_800_000_000_000;
 const SECRET = 'SECRET-PROMPT-TEXT';
+const FIRST = 'Make the rain sound loop without a gap'; // k42: the prompt's first line becomes the title (memory only)
 const ENVS = JSON.stringify({ ok: true, result: { environments: [{ id: 'env-1', name: 'other', endpoints: [{ endpoint: 'ws://10.0.0.2' }], pairedDeviceId: 'dev' }] } });
 const ps = (state = 'working', extra = {}) => JSON.stringify({ ok: true, result: { worktrees: [
   { repo: 'proj', path: 'C:\\Users\\me\\proj', branch: 'refs/heads/main', isMainWorktree: true, displayName: 'main', preview: SECRET, comment: SECRET,
-    agents: [{ paneKey: 'tab-1:1', state, agentType: 'claude', prompt: SECRET, lastAssistantMessage: SECRET, toolInput: { command: SECRET },
+    agents: [{ paneKey: 'tab-1:1', state, agentType: 'claude', prompt: `\n${FIRST}\n${SECRET}`, lastAssistantMessage: SECRET, toolInput: { command: SECRET }, toolName: 'PowerShell',
       stateStartedAt: NOW - 60_000, updatedAt: NOW - 5000, subagents: [{ id: 's', description: SECRET }], ...extra }] },
   { repo: 'proj', path: '/opt/proj-fix', branch: 'refs/heads/fix-sound', displayName: 'quiet-fox', agents: [] },
 ] } });
@@ -47,7 +48,11 @@ test('remote: maps each agent to a row under its machine; status via orcaStatus;
   assert.equal(r.status, 'needs-you');
   assert.equal(r.stateSince, NOW - 60_000);
   assert.equal(r.project, 'proj');
-  assert.equal(r.title, null); // the default branch says nothing; the panel shows "Session in proj"
+  assert.equal(r.title, FIRST); // k42: no Orca title and the default branch: the prompt's first line (fresh answer only)
+  assert.equal(r.titleSource, 'prompt');
+  assert.equal(r.agentType, 'claude');
+  assert.equal(r.toolName, 'PowerShell');
+  assert.equal(r.subagentCount, 1);
   assert.equal(r.model, null);
   assert.equal(r.tokens, null);
   assert.equal(r.context, null);
@@ -60,13 +65,19 @@ test('remote: maps each agent to a row under its machine; status via orcaStatus;
   assert.deepEqual(call.calls, ['environment list --json', 'worktree ps --environment env-1 --json']);
 }));
 
-test('remote: title from Orca taskTitle/displayName, else the branch; Windows paths give the folder', () => {
+test('remote: title from Orca taskTitle/displayName, else the prompt, else the branch; Windows paths give the folder', async () => {
+  const { remoteRow } = await import('../lib/remote.mjs');
   const [a] = mapRemote(ps('working', { taskTitle: 'Fix the rain sound' }));
   assert.equal(a.title, 'Fix the rain sound');
+  assert.equal(remoteRow('other', a, NOW, false, a.promptTitle).title, 'Fix the rain sound'); // Orca's own title wins
   const text = JSON.stringify({ result: { worktrees: [{ path: 'C:\\code\\game', branch: 'refs/heads/fix-sound', agents: [{ paneKey: 'p', state: 'done' }] }] } });
   const [b] = mapRemote(text);
-  assert.equal(b.title, 'fix-sound');
+  assert.equal(b.title, null);
+  assert.equal(b.branch, 'fix-sound');
   assert.equal(b.project, 'game');
+  assert.deepEqual([remoteRow('other', b, NOW).title, remoteRow('other', b, NOW).titleSource], ['fix-sound', 'branch']);
+  const long = mapRemote(ps('working', { prompt: 'Please make the rain sound loop smoothly '.repeat(8) }))[0];
+  assert.ok(long.promptTitle.length > 60 && [...long.promptTitle].length <= 80, long.promptTitle);
 });
 
 test('remote: no prompt, message, preview, comment, tool input or sub-agent text reaches the rows or the cache', () => withHome(async (home) => {
@@ -74,6 +85,7 @@ test('remote: no prompt, message, preview, comment, tool input or sub-agent text
   assert.ok(!JSON.stringify(rows).includes(SECRET));
   const cache = readFileSync(join(home, 'orca-remote.json'), 'utf8');
   assert.ok(!cache.includes(SECRET));
+  assert.ok(!cache.includes(FIRST) && !cache.includes('promptTitle'), 'the prompt-derived title never reaches the cache file');
   assert.ok(!cache.includes('10.0.0.2') && !cache.includes('dev')); // endpoints and device ids are not kept either
 }));
 
@@ -142,4 +154,37 @@ test('remote: stop and compact refuse a remote row (dry run too), and never touc
     assert.match(r.why, /runs on other/);
   }
   assert.equal(ran, false);
+});
+
+// ---------- k42 ----------
+test('k42: the cache keeps the whitelist only: tool name and sub-agent count, never the prompt or its title', () => withHome(async (home) => {
+  await readRemote(home, { call: caller({ env: okText(ENVS), ps: okText(ps()) }), now: NOW });
+  const cache = JSON.parse(readFileSync(join(home, 'orca-remote.json'), 'utf8'));
+  const [a] = cache.machines['env-1'].agents;
+  assert.deepEqual(Object.keys(a).sort(), ['agentType', 'branch', 'cwd', 'paneKey', 'project', 'state', 'stateStartedAt', 'subagentCount',
+    'title', 'toolName', 'updatedAt']);
+  assert.equal(a.toolName, 'PowerShell');
+  assert.equal(a.subagentCount, 1);
+  assert.equal(a.title, null);
+}));
+
+test('k42: the prompt title rides only on the run that got the answer; a cached or stale answer falls back', () => withHome(async (home) => {
+  let answer = okText(ps('working'));
+  const call = caller({ env: okText(ENVS), ps: () => answer });
+  let [r] = await readRemote(home, { call, now: NOW });
+  assert.equal(r.title, FIRST);
+  [r] = await readRemote(home, { call, now: NOW + 1000 }); // inside the gap: from the cache file, no prompt there
+  assert.deepEqual([r.title, r.titleSource], [null, null]);
+  answer = { ok: false, timeout: true };
+  [r] = await readRemote(home, { call, now: NOW + REMOTE_STALE_MS + 1 }); // a timeout: the last answer, stale
+  assert.equal(r.machineStale, true);
+  assert.equal(r.title, null);
+  assert.ok(!readFileSync(join(home, 'orca-remote.json'), 'utf8').includes(FIRST));
+}));
+
+test('k42: a sub-agent count counts running ones only; a tool name keeps a name, never its input', () => {
+  const [a] = mapRemote(ps('working', { toolName: 'Bash <rm -rf />; echo', subagents: [{ id: 'a', status: 'running', description: SECRET }, { id: 'b', status: 'done' }] }));
+  assert.equal(a.subagentCount, 1);
+  assert.ok(!/[<>;/]/.test(a.toolName));
+  assert.ok(!JSON.stringify({ ...a, promptTitle: null }).includes(SECRET)); // no sub-agent text
 });

@@ -97,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self?.phone.noteConfig(cfg) // the launch refresh's config starts serve when phone is true
         }
         panel.phone = phone
+        panel.computers = Computers() // k41: Settings › Computers
         // A plain SIGTERM would skip applicationWillTerminate and leave the serve child running: quit properly instead.
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
@@ -105,6 +106,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         termSource = term
         panel.onLoaded = { [weak self] in self?.panel.refresh(full: true) }
         panel.load()
+        // k42: the popover's height cap follows the status item's screen (resolution, Dock, display changes).
+        panel.fit(screen: statusItem.button?.window?.screen ?? NSScreen.main)
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.panel.fit(screen: self.statusItem.button?.window?.screen ?? NSScreen.main)
+        }
 
         let w = ChangeWatcher { [weak self] kinds in self?.changed(kinds) }
         w.start()
@@ -285,6 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // An accessory app must be active, or Escape and focus never reach the web view.
         NSApp.activate(ignoringOtherApps: true)
         panel.prepareFade()
+        panel.fit(screen: button.window?.screen ?? NSScreen.main) // k42: before the popover sizes itself
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         panel.fadeIn()
         blinker.blink(force: true)

@@ -82,7 +82,8 @@ enum CLI {
         return (p, "")
     }
 
-    static func run(_ args: [String], timeout: TimeInterval = 10) -> CLIResult {
+    /// stdin: bytes written to the child's stdin, then closed (k41: the pairing code, which must never be an argument).
+    static func run(_ args: [String], stdin: Data? = nil, timeout: TimeInterval = 10) -> CLIResult {
         func fail(_ why: String) -> CLIResult { CLIResult(code: -1, out: Data(), err: why, timedOut: false) }
         let (made, why) = process(args)
         guard let p = made else { return fail(why) }
@@ -90,7 +91,14 @@ enum CLI {
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
+        let inPipe = stdin.map { _ in Pipe() }
+        if let inPipe { p.standardInput = inPipe }
         do { try p.run() } catch { return fail("launch failed: \(error.localizedDescription)") }
+        if let inPipe, let stdin {
+            // small (<= 4 KB, below the pipe buffer): written whole, then EOF
+            try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
+            try? inPipe.fileHandleForWriting.close()
+        }
 
         // Drain stderr alongside stdout so neither pipe can fill up and stall the child.
         var errData = Data()

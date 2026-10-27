@@ -86,15 +86,17 @@ body { font: 13px/1.35 var(--font); color: var(--label); -webkit-font-smoothing:
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
 button:focus-visible, .row:focus-visible { outline: none; box-shadow: var(--focus); }
 
-.panel { position: relative; display: flex; flex-direction: column; width: 100%; max-height: 560px; padding: 8px;
+/* k42: --cap is the popover's room on this screen (PanelController: min(560, visible height under the menu bar - margin)).
+   The gauge and the bottom bar never shrink; only .list (Agents, sub-agents, other computers, Up next) scrolls. */
+.panel { position: relative; display: flex; flex-direction: column; width: 100%; max-height: var(--cap, 560px); padding: 8px;
   border-radius: var(--r-panel); background: var(--panel); overflow: hidden; }
 html[data-chrome="none"] .panel { border-radius: 0; }
 html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .panel > * { flex: none; }
 
 /* Gauge card */
-.card { background: var(--card); border-radius: var(--r-card); padding: 12px 14px 13px; }
-.lim + .lim { margin-top: 12px; }
+.card { background: var(--card); border-radius: var(--r-card); padding: 11px 14px 12px; }
+.lim + .lim { margin-top: 10px; }
 .lrow { display: flex; align-items: baseline; gap: 8px; }
 .lrow .k { font-weight: 500; white-space: nowrap; }
 .lrow .r { margin-left: auto; color: var(--label2); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -124,14 +126,15 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .acct button[aria-pressed="true"] { background: var(--panel); color: var(--label); box-shadow: var(--shadow-seg); font-weight: 500; }
 
 /* Sections and rows */
-.sh { display: flex; align-items: center; justify-content: space-between; padding: 12px 8px 4px; font-size: 12px; color: var(--label2); }
+.sh { display: flex; align-items: center; justify-content: space-between; padding: 10px 8px 3px; font-size: 12px; color: var(--label2); }
 .list { position: relative; flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
 .list::-webkit-scrollbar { display: none; }
 /* k32: the list reaches into the panel's padding (its rows stay put), so a lifted row's scale and shadow are not cut. */
 .list { margin: 0 -8px; padding: 0 8px; }
 .list.scroll { -webkit-mask-image: linear-gradient(180deg, #000 85%, transparent); mask-image: linear-gradient(180deg, #000 85%, transparent); }
 .list.scroll.end { -webkit-mask-image: none; mask-image: none; }
-.row { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--r-row); min-height: 44px; }
+/* k42: denser rows (the crowded case fits in about 480 pt); every row stays a 28+ pt target. */
+.row { position: relative; display: flex; align-items: center; gap: 10px; padding: 2px 8px; border-radius: var(--r-row); min-height: 38px; }
 .row { transition: background-color .12s ease-out; }
 /* k32: rows can be held and moved, so a press never starts a text selection or the iOS callout. */
 .list .row:not(.grp) { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -146,23 +149,15 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pv { font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .pv .need { color: var(--orange-text); font-weight: 500; }
-/* k32: the meta line in parts, each carrying its " · " (white-space: pre keeps it). The "Compact? 152k context" tag
-   and the context number never shrink. The other parts share what is left, each up to its own width, in this order of
-   need (flex-grow from a zero basis, steps of 100x): the state lead ("Needs you", "Idle 2 hr"), the age, the model,
-   then the project. So a narrow row loses the project first and never cuts the number ("430k co…"). */
-.pv.meta { display: flex; }
-.pv.meta > span { flex: none; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
-.pv.meta > :is(.ld, .du, .fm, .pj) { flex: 1 1 0; min-width: 0; max-width: max-content; }
-/* k38: a squeezed part never shows only its " · " or a lone "…" (the stray "Idle 1 min ." dot): it keeps room for the
-   separator, a letter and the ellipsis, and the line clips past that. */
-.pv.meta > :is(.du, .fm, .pj, .ps) { min-width: 2.6em; }
-.pv.meta > .ld { flex-grow: 1000000; }
-.pv.meta > .du { flex-grow: 10000; }
-.pv.meta > .fm { flex-grow: 100; }
-/* k35: "3/5 · Writing tests" right after the state words. The count never shrinks; the step gets room before the age,
-   model and project, so those are cut first. */
+/* k42: the meta line in whole parts, each carrying its " · " (white-space: pre keeps it), in order of need (panel.js).
+   The line wraps and shows its first line only, so a part that does not fit moves out of sight with everything after
+   it: a narrow row loses whole parts from the end and never shows one cut to "t…" or a lone " ·". Only the lead (the
+   first part, a status) may ellipsise, when it alone is wider than the row; the progress step is capped. */
+.pv.meta { display: flex; flex-wrap: wrap; height: 1.35em; line-height: 1.35em; overflow: hidden; }
+.pv.meta > span { flex: none; white-space: pre; }
+.pv.meta > :first-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pv.meta > .pn { color: var(--label); }
-.pv.meta > .ps { flex: 1 1 0; min-width: 0; max-width: max-content; flex-grow: 100000; }
+.pv.meta > .ps { max-width: 12em; overflow: hidden; text-overflow: ellipsis; }
 /* k35: the progress bar under the title: a 2 px track with a fill scaled from the left, between the two lines
    (3 px taller: a bar with no gap touched the title's descenders and the digits below); a hidden slot without progress */
 .pb { height: 2px; margin: 1px 0 0; position: relative; border-radius: 1px; background: var(--track); overflow: hidden; }
@@ -183,7 +178,7 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .rn::placeholder { color: var(--label3); font-weight: 400; }
 .row.renaming .acts { display: none; }
 .pv .urgent { color: var(--red-text); }
-.child { padding-left: 26px; min-height: 32px; }
+.child { padding-left: 26px; min-height: 28px; }
 .child .av { width: 22px; height: 22px; }
 .child .nm { font-weight: 400; color: var(--label2); font-size: 12px; }
 .row.ended .av { filter: grayscale(1); opacity: .55; }
@@ -219,7 +214,7 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .pick .nm, .pick .pv { display: block; max-width: 100%; }
 /* "N idle" group row: the toggle fills the row; Close all (or its confirm) sits at the end. */
 /* k38: another computer's group header: quiet, like the section heading; "offline" muted */
-.mh { padding: 10px 8px 2px; font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mh { padding: 8px 8px 2px; font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mh .mn { font-weight: 500; }
 .mh.off { color: var(--label3); }
 .row.grp { min-height: 36px; padding: 0 8px 0 0; gap: 6px; }
@@ -240,7 +235,7 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .empty .s { font-size: 12px; color: var(--label2); }
 
 /* Bottom bar */
-.bottom { display: flex; align-items: center; gap: 8px; padding: 10px 6px 4px; border-top: .5px solid var(--line); margin-top: 6px; }
+.bottom { display: flex; align-items: center; gap: 8px; padding: 8px 6px 2px; border-top: .5px solid var(--line); margin-top: 4px; }
 .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; }
 .sw { width: 30px; height: 18px; border-radius: 9px; background: var(--track); position: relative; transition: background .2s ease-out; flex: none; }
 .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--knob);
@@ -430,3 +425,13 @@ html[data-shell="phone"] .seg button { min-height: 32px; padding: 0 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+/* k41: Settings › Computers. An offline computer is muted; the add form's two fields; the remove confirm. */
+.it.off .tx > div:first-child { color: var(--label3); }
+.cfm { display: flex; gap: 6px; flex: none; }
+.it.col.cform { gap: 8px; }
+.fld { display: block; width: 100%; box-sizing: border-box; font: inherit; color: var(--label); background: var(--panel); border: .5px solid var(--line);
+  border-radius: 8px; height: 30px; padding: 0 9px; outline: none; -webkit-user-select: text; user-select: text; }
+.fld::placeholder { color: var(--label3); }
+.fld:focus-visible, .fld:focus { box-shadow: var(--focus); border-color: transparent; }
+.cfoot { display: flex; justify-content: flex-end; align-items: center; gap: 6px; min-height: 26px; }
+html[data-shell="phone"] .fld { height: 40px; font-size: 16px; }
