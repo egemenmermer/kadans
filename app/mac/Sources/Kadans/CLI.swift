@@ -59,12 +59,13 @@ struct CLIResult {
 
 /// Runs `node <repo>/bin/kadans.mjs <args>` as an argv array (never a shell string). Blocking: call it off the main thread.
 enum CLI {
-    static func run(_ args: [String], timeout: TimeInterval = 10) -> CLIResult {
-        func fail(_ why: String) -> CLIResult { CLIResult(code: -1, out: Data(), err: why, timedOut: false) }
-        guard let node = Config.nodePath else { return fail("node not found (set KADANS_NODE)") }
-        guard let repo = Config.repoDir else { return fail("repo path unknown (set KADANS_REPO or rebuild with scripts/build-app.sh)") }
+    /// A `node <repo>/bin/kadans.mjs <args>` process, set up but not started (argv only, never a shell), or why not.
+    /// k28: also used for the long-lived `kadans serve` child (Phone.swift).
+    static func process(_ args: [String]) -> (Process?, String) {
+        guard let node = Config.nodePath else { return (nil, "node not found (set KADANS_NODE)") }
+        guard let repo = Config.repoDir else { return (nil, "repo path unknown (set KADANS_REPO or rebuild with scripts/build-app.sh)") }
         let script = repo.appendingPathComponent("bin/kadans.mjs").path
-        guard FileManager.default.fileExists(atPath: script) else { return fail("not found: \(script)") }
+        guard FileManager.default.fileExists(atPath: script) else { return (nil, "not found: \(script)") }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: node)
@@ -77,9 +78,16 @@ enum CLI {
                      "\(home)/.local/bin", "/Applications/Orca.app/Contents/Resources/bin"]
         env["PATH"] = (extra + [env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]).joined(separator: ":")
         p.environment = env
+        p.standardInput = FileHandle.nullDevice
+        return (p, "")
+    }
+
+    static func run(_ args: [String], timeout: TimeInterval = 10) -> CLIResult {
+        func fail(_ why: String) -> CLIResult { CLIResult(code: -1, out: Data(), err: why, timedOut: false) }
+        let (made, why) = process(args)
+        guard let p = made else { return fail(why) }
 
         let outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = FileHandle.nullDevice
         p.standardOutput = outPipe
         p.standardError = errPipe
         do { try p.run() } catch { return fail("launch failed: \(error.localizedDescription)") }

@@ -138,6 +138,7 @@
     compact: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8v4.4M5.6 4 8 6.2 10.4 4M8 14.2V9.8M5.6 12 8 9.8l2.4 2.2M3.5 8h9"/></svg>',
     chev: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4l4 4-4 4"/></svg>',
     theme: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>',
+    pen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 3.2l2.2 2.2-7.3 7.3-2.9.7.7-2.9z"/></svg>',
     gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
   };
 
@@ -158,7 +159,14 @@
     closeAll: false, closeTimer: null, bulk: null,
     // k10b: the one compact in flight, { id, tokens (context at the click), at, failedAt }.
     // k12: the latest action result for one row, { id, ok, why, at }, shown for RESULT_KEEP_MS.
-    compact: null, result: null };
+    compact: null, result: null,
+    // k27: phoneWant = a flipped Phone switch waiting for the app; pairTimer = the code countdown; tapKey = the row whose
+    // actions a tap opened (touch screens have no hover).
+    phoneWant: null, pairTimer: null, tapKey: null,
+    // k32: rename = the chat whose title is being edited { id, start }; titles = renames sent, shown until the data
+    // agrees { title, prev, at }; order = the owner's new order of the live rows { ids, at }, shown until the data
+    // agrees; liveIds = the live rows in the order last drawn.
+    rename: null, titles: new Map(), order: null, liveIds: [] };
 
   // ---------- motion (k9a, k14) ----------
   // Calm and short: 120-260 ms, transform and opacity only. Nothing moves on the first paint, in the 300 ms after it
@@ -334,7 +342,11 @@
 
   // ---------- gauge card ----------
   const LIMIT_NAME = { five_hour: '5-hour limit', seven_day: '7-day limit' };
-  const limitName = (n) => own(LIMIT_NAME, n, String(n ?? 'Limit').replace(/_/g, ' '));
+  const limitName = (n) => {
+    const days = /^window_(\d+)$/.exec(String(n ?? ''));
+    if (days && Number(days[1]) % 1440 === 0) return `${Number(days[1]) / 1440}-day limit`; // Codex windows in minutes
+    return own(LIMIT_NAME, n, String(n ?? 'Limit').replace(/_/g, ' '));
+  };
 
   function resetText(l, now) {
     if (l.ended || !finite(l.resetsAt) || l.resetsAt <= now) return 'Resetting';
@@ -418,7 +430,8 @@
 
   function accountLabel(a, i, accounts) {
     if (a.own) return 'Mine';
-    const others = accounts.filter((x) => !x.own);
+    if (a.kind === 'codex') return 'Codex';
+    const others = accounts.filter((x) => !x.own && x.kind !== 'codex');
     return others.length > 1 ? `Other ${others.indexOf(a) + 1}` : 'Other';
   }
 
@@ -442,7 +455,7 @@
       return { mode: 'no_data', item: msg('no_data', 'idle', 'No data yet',
         "Kadans reads your limit after Claude's next reply. Send any message in Claude Code.") };
     }
-    let acct = accounts.find((a) => a.key === view.account) ?? accounts[0];
+    let acct = accounts.find((a) => a.key === view.account) ?? accounts.find((a) => a.acts !== false) ?? accounts[0];
     view.account = acct.key;
     // k18: the account control and each limit are keyed shells, so switching accounts patches the pressed button and
     // glides the fills that both accounts have, instead of replacing the card's insides.
@@ -480,7 +493,9 @@
   const FACE = { working: 'work', 'needs-you': 'wait', idle: 'idle', slowed: 'slow', paused: 'pause', ended: 'done' };
 
   function titleOf(a) {
-    if (a.title) return String(a.title);
+    const want = view.titles.get(String(a.id)); // k32: a rename sent, shown until the data has it
+    if (want?.title) return want.title;
+    if (a.title && !want) return String(a.title);
     const p = String(a.firstPrompt ?? '').replace(/\s+/g, ' ').trim();
     if (p) return p.length > 60 ? `${p.slice(0, 59).trimEnd()}…` : p;
     if (a.orca?.title) return String(a.orca.title);
@@ -582,7 +597,15 @@
   // The host's answer to a bridge action: { action, id, ok, why }. Only a failed stop, compact or replace shows (why: the
   // first line of the CLI's message, text only); the rest is read from the next refresh, as before.
   function actionResult(r) {
-    if (!r || typeof r !== 'object' || r.ok === true || !['stop', 'compact', 'replace'].includes(r.action) || r.id == null) return;
+    // k32: a refused reorder drops the local order (the rows go back to the served order); a refused rename drops the
+    // name shown early and says why on the row.
+    if (r && typeof r === 'object' && r.ok !== true && r.action === 'reorder') {
+      view.order = null;
+      render({});
+      return;
+    }
+    if (!r || typeof r !== 'object' || r.ok === true || !['stop', 'compact', 'replace', 'rename'].includes(r.action) || r.id == null) return;
+    if (r.action === 'rename') view.titles.delete(String(r.id));
     const why = typeof r.why === 'string' ? r.why.replace(/\s+/g, ' ').trim().slice(0, 200) : '';
     if (r.action === 'compact' && view.compact && String(view.compact.id) === String(r.id)) view.compact = null;
     setResult(r.id, false, why || 'It did not work');
@@ -611,11 +634,12 @@
         `<button class="pill" data-do="cancel" data-id="${esc(id)}">Cancel</button></div>`;
     }
     if (st === 'ended') return `<div class="acts">${btn('dismiss', id, IC.x, 'Dismiss')}</div>`;
+    if (a.machine) return '<div class="acts"></div>'; // k38: an agent on another computer: shown, never acted on
     let first;
     // Only Claude sessions on this Mac carry Kadans hooks; Orca-only rows have no session id to pace.
     const canPace = a.source !== 'orca' && !String(id).startsWith('orca:');
     const noPace = "Can't pace from here";
-    if (st === 'needs-you') first = btn('open', id, IC.open, 'Open in terminal');
+    if (st === 'needs-you') first = net.mode === 'bridge' ? btn('open', id, IC.open, 'Open in terminal') : ''; // no terminal on a phone
     else if (st === 'slowed' || st === 'paused') first = btn('resume', id, IC.play, 'Resume', { disabled: !canPace, why: noPace });
     else first = btn('pace', id, IC.pace, 'Slow or pause', { disabled: !canPace, why: noPace, menu: true });
     const canStop = canStopAgent(a);
@@ -625,7 +649,9 @@
       ? btn('close', id, IC.x, 'Close chat', { disabled: !canStop, why: "Can't close from here" })
       : btn('confirm', id, IC.stop, 'Stop', { disabled: !canStop, why: "Can't stop from here" });
     const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
-    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${first}` +
+    // k32: on a phone (no double-click) the row's tap actions start with Rename.
+    const ren = touchUi() ? btn('rename', id, IC.pen, 'Rename') : '';
+    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${ren}${first}` +
       `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${comp}${last}</div>`;
   }
 
@@ -654,6 +680,31 @@
     return r.length ? Math.min(...r) : null;
   }
 
+  // k32: what a sub-agent spends. `context` (newest input + cache) when known, else `tokens` (lifetime); both numbers or
+  // null from `agents --json` (k31). An older CLI may send context as { tokens }. Null when neither is known.
+  function subUse(s) {
+    const ctx = finite(s.context) ? s.context : finite(s.context?.tokens) ? s.context.tokens : null;
+    const tok = finite(s.tokens) ? s.tokens : null;
+    const short = tokens(ctx ?? tok);
+    if (!short) return null;
+    const tip = [tokens(ctx) ? `${tokens(ctx)} context` : null, tokens(tok) ? `${tokens(tok)} tokens since start` : null].filter(Boolean).join(' · ');
+    return { short, tip };
+  }
+
+  // k35: { done, total, step, text, aria, frac } of an agent or sub-agent that reported progress, else null.
+  function progressOf(x) {
+    const p = x?.progress;
+    if (!p || !finite(p.done) || !finite(p.total) || p.total < 1) return null;
+    const total = Math.floor(p.total);
+    const done = Math.max(0, Math.min(total, Math.floor(p.done)));
+    const step = typeof p.step === 'string' && p.step.trim() ? p.step.trim().slice(0, 60) : '';
+    return { done, total, step, count: `${done}/${total}`, text: `${done}/${total}${step ? ` · ${step}` : ''}`, aria: `${done} of ${total} done${step ? `: ${step}` : ''}`,
+      frac: Math.round((done / total) * 1000) / 1000 };
+  }
+  // The thin bar under a title. Always present on a main row (hidden without progress) so the text column keeps its
+  // item count and a rename field is never rebuilt; a new value only patches the transform, which then glides.
+  const barItem = (pg) => S('div', { class: pg ? 'pb' : 'pb off', 'aria-hidden': 'true' }, [S('i', { style: `transform:scaleX(${pg ? pg.frac : 0})` })]);
+
   // Agent rows as keyed items for the list: a row is a shell (blob, text, actions) so a changed meta line replaces only
   // its text and the row node itself (hover, focus) stays.
   function agentRows(list, now, tasks) {
@@ -661,6 +712,7 @@
     for (const a of list) {
       const st = rowState(a);
       const title = titleOf(a);
+      const pg = st === 'ended' ? null : progressOf(a);
       let [pre, preText] = prefixOf(st, a, now);
       const swap = view.confirm === a.id && view.kind === 'replace' ? tasks.find((t) => String(t.id) === String(view.task)) : null;
       if (swap) [pre, preText] = [`Replace with: ${esc(swap.text)}`, `Replace with: ${swap.text}. `];
@@ -686,18 +738,26 @@
       const tagTip = tagOn ? `${why || 'Big context'}${canCompact(a) ? '' : `. ${TYPE_IT}`}` : '';
       // The tag and its number lead the meta line (like "Needs you"), so a long line never cuts them off.
       const tag = tagOn ? `<span class="tag" title="${esc(tagTip)}">Compact?</span> ${esc(ctx)} · ` : '';
-      const parts = [a.project, st === 'ended' ? null : family(a.model), tagOn ? null : ctx,
-        st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt)].filter(Boolean).map(String);
-      let line = quiet ? '' : parts.join(' · ');
+      // k32: each part sits in its own span so a narrow row shortens the project first (then model, then age) and never
+      // cuts the context number ("430k co…"); see .pv.meta in panel.css.
+      const segs = [['pj', a.project], ['fm', st === 'ended' ? null : family(a.model)], ['cx', tagOn ? null : ctx],
+        ['du', st === 'ended' || !finite(a.startedAt) ? null : dur(now - a.startedAt)]].filter(([, t]) => t).map(([c, t]) => [c, String(t)]);
+      let line = quiet ? '' : segs.map(([, t]) => t).join(' · ');
       // A refused action: its reason is the whole meta line (the full text in the title), reusing the .warn line.
       if (rs && !rs.ok) [pre, preText, line] = [`<span class="warn" title="${esc(rs.why)}" style="${REASON_STYLE}">${esc(rs.why)}</span>`, `${rs.why}. `, ''];
       const life = tokens(a.tokens);
-      const tip = life ? `${title}\n${life} tokens since start, cache reads not counted` : title;
-      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id ? ' hov' : ''}`;
+      const subT = tokens(a.subagentTokens);
+      const tip = [title, life ? `${life} tokens since start, cache reads not counted` : null, subT ? `sub-agents: ${subT}` : null].filter(Boolean).join('\n');
       const key = `row:${a.id}`;
+      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id || view.tapKey === key ? ' hov' : ''}${view.rename && String(view.rename.id) === String(a.id) ? ' renaming' : ''}`;
+      const meta = quiet || (rs && !rs.ok) ? `<div class="pv">${tag}${pre}${esc(line)}</div>`
+        : `<div class="pv meta">${[['tg', tag], ['ld', pre], ['pn', pg ? pg.count : ''], ['ps', pg ? esc(pg.step) : ''], ...segs.map(([c, t]) => [c, esc(t)])].map(([c, h]) => [c, h.replace(/ · $/, '')])
+          .filter(([, h]) => /[^\s·.…]/.test(h.replace(/<[^>]*>/g, ''))).map(([c, h], i) => `<span class="${c}">${i ? ' · ' : ''}${h}</span>`).join('')}</div>`;
+      // The name and the meta line are separate items, so the minute tick replaces only the meta line (and a rename
+      // input in the name slot keeps its node, its caret and what was typed).
       items.push(S('div', { class: cls, tabindex: 0, 'data-key': key, title: tip,
-        'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${line}` }, [blob(shapeFor(a.id), FACE[st], 30, MOVE[st] ?? null, a.id),
-        `<div class="tx"><div class="nm">${esc(title)}</div><div class="pv">${tag}${pre}${esc(line)}</div></div>`, actsHtml(a, st, tasks)], key));
+        'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${pg && !quiet ? `${pg.aria}. ` : ''}${line}` }, [blob(shapeFor(a.id), FACE[st], 30, MOVE[st] ?? null, a.id),
+        S('div', { class: 'tx' }, [nameItem(a, title), barItem(pg), meta]), actsHtml(a, st, tasks)], key));
       if (askC) {
         items.push({ key: `why:${a.id}`, html: `<div class="cwhy" data-key="why:${esc(a.id)}"><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>` });
       }
@@ -712,8 +772,12 @@
         if (s.status !== 'running') continue;
         const name = s.description || s.type || 'Subagent';
         const key = `sub:${s.id}`;
-        items.push(S('div', { class: 'row child', tabindex: 0, 'data-key': key, title: name, 'aria-label': `Subagent: ${name}` },
-          [blob(shapeFor(s.id), 'work', 22, 'work', s.id), `<div class="tx"><div class="nm">${esc(name)}</div></div>`], key));
+        const n = subUse(s);
+        const sp = progressOf(s);
+        items.push(S('div', { class: 'row child', tabindex: 0, 'data-key': key, title: [name, sp ? sp.text : null, n ? n.tip : null].filter(Boolean).join('\n'),
+          'aria-label': `Subagent: ${name}${sp ? `. ${sp.aria}` : ''}${n ? `. ${n.tip}` : ''}` }, [blob(shapeFor(s.id), 'work', 22, 'work', s.id),
+          `<div class="tx sub"><div class="nm">${esc(name)}</div>${sp ? `<span class="sq">· ${sp.count}</span>${sp.step ? `<span class="sp">· ${esc(sp.step)}</span>` : ''}` : ''}${n ? `<span class="sn">· ${esc(n.short)}</span>` : ''}` +
+          `${sp ? `<div class="pb" aria-hidden="true"><i style="transform:scaleX(${sp.frac})"></i></div>` : ''}</div>`], key));
       }
     }
     return items;
@@ -905,6 +969,70 @@
     return items;
   }
 
+  // k27: Settings › Phone (Mac only). The app pushes {phone: {on, url, pair: {url, qr, expiresAt} | null, devices: [{id,
+  // name, lastSeenAt}], error}}; the page sends phone-on / phone-off / phone-pair / phone-revoke. Hidden when no phone
+  // payload came (an older app, and on the phone itself). A flipped switch shows its new state until the app confirms it
+  // (or 8 s pass). The error is a fixed string: the app's text is never shown. The QR is drawn only from a PNG data URL.
+  const PHONE_NOTE = 'On your Wi-Fi the link is not encrypted; turn on Tailscale to use it away from home or on shared Wi-Fi';
+  const QR_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/;
+  function phoneData() {
+    const p = view.data?.phone;
+    return p && typeof p === 'object' ? p : null;
+  }
+  function phoneOn(p) {
+    const w = view.phoneWant;
+    if (w && Date.now() - w.at < PENDING_MS) return w.on;
+    return p.on === true;
+  }
+  const mmss = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    return `${Math.floor(s / 60)}:${pad(s % 60)}`;
+  };
+  const ago = (t, now) => (!finite(t) ? 'Not used yet' : now - t < MIN ? 'Used just now' : `Used ${dur(now - t)} ago`);
+  function phoneItems(p) {
+    const now = Date.now();
+    const on = phoneOn(p);
+    const sw = S('button', { class: 'sw', role: 'switch', 'aria-checked': String(on), 'aria-label': 'Use Kadans on your phone',
+      'data-do': on ? 'phone-off' : 'phone-on', 'data-key': 'set:phone' });
+    const items = [sItem('phone', 'Use Kadans on your phone', esc(PHONE_NOTE), sw)];
+    if (!on) return items;
+    if (typeof p.error === 'string' && p.error) {
+      items.push({ key: 'phone-err', html: '<div class="it col un"><div class="d warn">Couldn’t start the phone link. Turn it off and on to try again.</div></div>' });
+      return items;
+    }
+    const pair = p.pair && typeof p.pair === 'object' ? p.pair : null;
+    const qrOk = pair && typeof pair.qr === 'string' && QR_RE.test(pair.qr) && finite(pair.expiresAt);
+    if (qrOk && pair.expiresAt > now) {
+      items.push(S('div', { class: 'it col qrb' }, [
+        { key: 'qr-img', html: `<div class="qrw"><img class="qr" src="${esc(pair.qr)}" alt="Pairing code for your phone" width="160" height="160"></div>` },
+        { key: 'qr-say', html: '<div class="qrt">Scan with your phone’s camera, then Add to Home Screen</div>' },
+        { key: 'qr-left', html: `<div class="d qrl" role="timer">Works once · ${mmss(pair.expiresAt - now)} left</div>` },
+      ], 'pairing', true));
+    } else if (qrOk) {
+      items.push(sItem('pair', 'This code has expired', 'Each code works once, within 10 minutes.',
+        '<button class="pill blue" data-do="phone-pair" data-key="phone-pair">New code</button>'));
+    } else {
+      items.push(sItem('pair', 'Pair a phone', 'Shows a code to scan. It works once, within 10 minutes.',
+        '<button class="pill blue" data-do="phone-pair" data-key="phone-pair">Show code</button>'));
+    }
+    const devs = Array.isArray(p.devices) ? p.devices.filter((x) => x && typeof x.id === 'string' && x.id) : [];
+    for (const dv of devs) {
+      const name = typeof dv.name === 'string' && dv.name.trim() ? dv.name.trim().slice(0, 40) : 'Phone';
+      items.push(sItem(`dev:${dv.id}`, esc(name), esc(ago(dv.lastSeenAt, now)),
+        `<button class="pill quiet danger" data-do="phone-revoke" data-id="${esc(dv.id)}" data-key="revoke:${esc(dv.id)}" aria-label="Revoke ${esc(name)}">Revoke</button>`));
+    }
+    return items;
+  }
+  // One 1 s timer while Settings shows a live code: each tick patches the countdown text only.
+  function pairTick() {
+    clearTimeout(view.pairTimer);
+    view.pairTimer = null;
+    const p = phoneData();
+    const exp = p?.pair?.expiresAt;
+    if (view.screen !== 'settings' || !p || !phoneOn(p) || !finite(exp) || exp <= Date.now() - 1000) return;
+    view.pairTimer = setTimeout(() => { view.pairTimer = null; if (view.screen === 'settings') renderScreen(); }, 1000 - (Date.now() % 1000) || 1000);
+  }
+
   // Hook changes grouped by hook kind (the event hook alone covers seven events).
   function hookGroups(install) {
     const groups = new Map();
@@ -1013,6 +1141,9 @@
         sSwitch('notify', 'Allow notifications')),
     ]));
 
+    const ph = phoneData();
+    if (ph && net.mode === 'bridge') body.push(...sGroup('phone', 'Phone', phoneItems(ph)));
+
     body.push(...sGroup('general', 'General', [
       sItem('lang', 'Status line language', 'The line under Claude Code’s prompt.', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']])),
     ]));
@@ -1029,7 +1160,7 @@
         `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} uninstall --apply</pre>` +
         `<div class="d">Without <span class="code">--apply</span> it only shows the change.</div></div>` });
     }
-    body.push(...sGroup('cc', 'Claude Code', cc));
+    if (net.mode === 'bridge') body.push(...sGroup('cc', 'Claude Code', cc)); // hooks are set up on the Mac, not from a phone
     return screenShell('settings', ' tall', 'Kadans settings', [topItem('Settings'), S('div', { class: 'sbody', id: 'k-sbody' }, body, 'body', true)]);
   }
 
@@ -1095,8 +1226,9 @@
   function render(data) {
     const d = data && typeof data === 'object' ? data : {};
     const next = { ...(view.data ?? {}) };
-    for (const k of ['status', 'agents', 'config', 'install']) if (k in d) next[k] = d[k];
+    for (const k of ['status', 'agents', 'config', 'install', 'phone']) if (k in d) next[k] = d[k];
     view.data = next;
+    if ('phone' in d && view.phoneWant && (d.phone?.on === view.phoneWant.on || d.phone?.error)) view.phoneWant = null;
     if ('config' in d) settlePending(d.config);
     if ('install' in d && view.applying) {
       view.applying = false;
@@ -1104,11 +1236,21 @@
       view.applied = !view.applyFailed;
     }
     if (view.screen !== 'main') return renderScreen();
+    // k32: a row held or settling is never yanked: the data is kept and drawn when it lands.
+    if (drag.phase === 'on' || drag.phase === 'settle') {
+      drag.deferred = true;
+      return;
+    }
     view.stree = null;
     const status = view.data.status ?? null;
     const now = finite(status?.now) ? status.now : Date.now();
     const g = gauge(status, now);
-    const { all, old, live } = split(now);
+    const { all, old, live: served, away } = split(now);
+    const live = applyOrder(served);
+    view.liveIds = live.map((a) => a.id);
+    settleTitles(all);
+    if (view.rename && !live.some((a) => String(a.id) === String(view.rename.id) && rowState(a) !== 'ended') &&
+      !(view.idleOpen && old.some((a) => String(a.id) === String(view.rename.id)))) view.rename = null;
     const tasks = startable(status?.queue);
     if (view.confirm && !all.some((a) => a.id === view.confirm)) view.confirm = null;
     if (view.confirm && view.kind === 'replace' && !tasks.some((t) => String(t.id) === String(view.task))) view.confirm = null;
@@ -1117,10 +1259,12 @@
     if (view.picker && (!all.some((a) => a.id === view.picker) || !tasks.length)) view.picker = null;
     if (view.pacer && !all.some((a) => a.id === view.pacer && ['working', 'idle'].includes(rowState(a)))) view.pacer = null;
     if (!old.length) view.closeAll = false;
+    if (view.tapKey && !all.some((a) => `row:${a.id}` === view.tapKey)) view.tapKey = null;
     const subs = (a, rank) => (rowState(a) === 'ended' || !Array.isArray(a.subagents) ? []
       : a.subagents.filter((x) => x && x.status === 'running').map((x) => ({ id: x.id, startedAt: x.startedAt, rank })));
     shapeMap = assignShapes([...live.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 0 })), ...live.flatMap((a) => subs(a, 1)),
-      ...old.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 2 })), ...old.flatMap((a) => subs(a, 3))]);
+      ...old.map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 2 })), ...old.flatMap((a) => subs(a, 3)),
+      ...away.filter((a) => !a.machineOffline).map((a) => ({ id: a.id, startedAt: a.startedAt, rank: 4 }))]);
 
     const blocks = [];
     if (g.mode !== 'no_claude') {
@@ -1132,6 +1276,7 @@
       blocks.push({ key: 'sh', html: `<div class="sh"><span>Agents</span><span>${live.length || ''}</span></div>` });
       const rows = agentRows(live, now, tasks);
       if (old.length) rows.push(groupHtml(old, now), ...(view.idleOpen ? agentRows(old, now, tasks) : []));
+      rows.push(...machineRows(away, now, tasks));
       if (all.length) {
         const list = S('div', { class: 'list', id: 'k-list' }, rows, 'list', true);
         list.fade = true;
@@ -1146,6 +1291,10 @@
       if (up) blocks.push({ key: 'upnext', html: up });
     }
     blocks.push(bottom(status, g.mode));
+    // k27 phone: pairing / pair again replace the panel; "can't reach your Mac" sits above the last reading.
+    const pc = phoneCard();
+    if (pc && net.state !== 'offline' && net.state !== 'off') blocks.splice(0, blocks.length, pc);
+    else if (pc) blocks.unshift(pc);
     const tree = S('div', { class: 'panel', role: 'dialog', 'aria-label': 'Kadans' }, blocks, 'panel', true);
 
     const el = root();
@@ -1189,13 +1338,33 @@
     reportSize();
   }
 
+  // k38: one quiet header per other computer ("other · 2"; "other · offline" muted, its rows hidden), then its rows.
+  function machineRows(away, now, tasks) {
+    const out = [];
+    for (const name of [...new Set(away.map((a) => a.machine))]) {
+      const rows = away.filter((a) => a.machine === name);
+      const off = rows.some((a) => a.machineOffline);
+      const shown = off ? [] : rows.filter((a) => !a.machineOffline);
+      const stale = shown.some((a) => a.machineStale === true);
+      const note = off ? 'offline' : `${shown.length}${stale ? ' · not live' : ''}`;
+      out.push({ key: `mh:${name}`, html: `<div class="mh${off ? ' off' : ''}" data-key="mh:${esc(name)}" title="${esc(off ? `${name} is offline` : `Agents on ${name}`)}">` +
+        `<span class="mn">${esc(name)}</span> · <span class="mc">${note}</span></div>` });
+      out.push(...agentRows(shown, now, tasks));
+    }
+    return out;
+  }
+
   // all: rows the panel shows; old: idle chats quiet for 2+ hours, folded into the "N idle" group at the end; live: the rest.
   function split(now) {
     const all = agentList(view.data?.agents).filter((a) => a && a.id != null && !view.dismissed.has(a.id))
       .filter((a) => a.status !== 'ended' || !finite(a.lastSeen) || now - a.lastSeen < ENDED_KEEP_MS);
-    const old = all.filter((a) => rowState(a) === 'idle' &&
+    // k38: agents on other computers (paired Orca environments) go in their own groups after everything local: never in
+    // the Agents count, the idle group, Close all or the reorder.
+    const away = all.filter((a) => typeof a.machine === 'string' && a.machine);
+    const here = all.filter((a) => !away.includes(a));
+    const old = here.filter((a) => rowState(a) === 'idle' &&
       (a.stale === true || (finite(a.lastSeen) && now - a.lastSeen > STALE_MS)));
-    return { all, old, live: all.filter((a) => !old.includes(a)) };
+    return { all, old, live: here.filter((a) => !old.includes(a)), away };
   }
 
   // ---------- close idle chats (k9a) ----------
@@ -1408,12 +1577,15 @@
     view.stree = tree;
     if (focusKey && !el.contains(document.activeElement)) restoreFocus(el, focusKey);
     scheduleBlinks();
+    pairTick();
     if (full || patchStats.made + patchStats.replaced + patchStats.removed + patchStats.attrs !== before) settle();
   }
 
   // dir: 'in' (Settings, Review) or 'back' (the screen you return to).
   function go(screen, dir = 'in') {
     if (view.screen === 'main' && view.tree) view.scroll = listNode()?.scrollTop ?? 0;
+    // k27/k28: the app polls `devices --json` only while Settings is open; tell it when the page leaves for the main panel.
+    if (screen === 'main' && view.screen !== 'main' && net.mode === 'bridge') send({ action: 'settings-closed' });
     view.slide = motionOk() ? { dir, at: Date.now() } : null;
     view.screen = screen;
     view.sScroll = 0;
@@ -1421,6 +1593,7 @@
     view.uninstallOpen = false;
     view.applyFailed = false;
     view.applied = false;
+    if (net.mode === 'http') try { window.scrollTo?.(0, 0); } catch { /* the phone page scrolls, not the list */ }
     render({});
   }
 
@@ -1475,8 +1648,368 @@
     send({ action: 'size', height: h });
   }
 
+  // ---------- rename (k32) ----------
+  // Double-click a chat's title (Mac) or Rename in its tap actions (phone): the title becomes an input with the current
+  // title. Enter saves (rename), Escape or leaving the field cancels, empty clears to the automatic title. The input's
+  // markup is built from the title at the start, so a refresh keeps its node (caret and typed text stay).
+  const TITLE_MAX = 80;
+  const TITLE_HOLD_MS = 10_000;
+  const cleanTitle = (t) => String(t ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX);
+  function nameItem(a, title) {
+    const r = view.rename;
+    if (!r || String(r.id) !== String(a.id)) return `<div class="nm">${esc(title)}</div>`;
+    return { rename: true, html: `<input class="rn" type="text" data-key="rn:${esc(a.id)}" value="${esc(r.start)}" maxlength="${TITLE_MAX}" ` +
+      `placeholder="Automatic title" aria-label="Chat name" spellcheck="false" autocomplete="off" enterkeyhint="done">` };
+  }
+  function renameInput(it = view.tree) {
+    if (!it) return null;
+    if (it.rename) return it.node ?? null;
+    for (const k of it.kids ?? []) { const n = renameInput(k); if (n) return n; }
+    return null;
+  }
+  function startRename(id) {
+    const a = findAgent(id);
+    if (!a || a.machine || rowState(a) === 'ended' || view.screen !== 'main') return; // k38: no rename for another computer's agent
+    setConfirm(null);
+    view.picker = null;
+    view.pacer = null;
+    view.tapKey = null;
+    view.rename = { id: a.id, start: cleanTitle(titleOf(a)) };
+    render({});
+    const inp = renameInput();
+    try { inp?.focus?.(); inp?.select?.(); } catch { /* no focus in this host */ }
+  }
+  function endRename(save) {
+    const r = view.rename;
+    if (!r) return;
+    const typed = cleanTitle(renameInput()?.value ?? r.start);
+    view.rename = null;
+    const a = findAgent(r.id);
+    if (save && a && typed !== r.start && (typed || a.title)) {
+      view.titles.set(String(a.id), { title: typed, prev: a.title ?? null, at: Date.now() });
+      clearResult(a.id);
+      send({ action: 'rename', id: a.id, title: typed });
+      setTimeout(() => render({}), TITLE_HOLD_MS + 50);
+    }
+    render({});
+  }
+  // A sent name is shown until the chat's title in the data changes, at most TITLE_HOLD_MS.
+  function settleTitles(all) {
+    const now = Date.now();
+    for (const [id, w] of view.titles) {
+      const a = all.find((x) => String(x.id) === id);
+      if (!a || String(a.title ?? '') !== String(w.prev ?? '') || now - w.at > TITLE_HOLD_MS) view.titles.delete(id);
+    }
+  }
+  function onDbl(e) {
+    if (touchUi() || view.screen !== 'main' || drag.phase || !e.target?.closest?.('.nm')) return;
+    const key = e.target.closest('.row[data-key]')?.getAttribute('data-key') ?? '';
+    if (key.startsWith('row:')) startRename(key.slice(4));
+  }
+
+  // ---------- arrange (k32) ----------
+  // The owner's order of the live rows (not the idle group, not ended rows). It is drawn at once and held until the
+  // served order agrees (the CLI stored it), at most ORDER_HOLD_MS; then the data decides again. Keyboard and drag both
+  // end in commitOrder, which sends one reorder with the live ids in their new order.
+  const ORDER_HOLD_MS = 10_000;
+  function applyOrder(list) {
+    const o = view.order;
+    if (!o) return list;
+    const pos = new Map(o.ids.map((id, i) => [String(id), i]));
+    const known = list.filter((a) => pos.has(String(a.id)));
+    const agrees = known.every((a, i) => i === 0 || pos.get(String(known[i - 1].id)) < pos.get(String(a.id)));
+    if (agrees || Date.now() - o.at > ORDER_HOLD_MS) {
+      view.order = null;
+      return list;
+    }
+    return [...known.sort((x, y) => pos.get(String(x.id)) - pos.get(String(y.id))), ...list.filter((a) => !pos.has(String(a.id)))];
+  }
+  function commitOrder(ids) {
+    view.order = { ids: ids.map(String), at: Date.now() };
+    const byId = new Map(agentList(view.data?.agents).filter((a) => a && a.id != null).map((a) => [String(a.id), a]));
+    const out = ids.map((id) => byId.get(String(id))).filter((a) => a && rowState(a) !== 'ended').map((a) => a.id).slice(0, 50);
+    send({ action: 'reorder', ids: out });
+    setTimeout(() => render({}), ORDER_HOLD_MS + 50);
+  }
+  // Alt+Up / Alt+Down on a focused row: one place, at once (keyboard moves never animate). False: not a live row.
+  function keyMove(id, dir) {
+    const ids = [...view.liveIds];
+    const i = ids.findIndex((x) => String(x) === String(id));
+    const a = i < 0 ? null : findAgent(ids[i]);
+    if (!a || rowState(a) === 'ended') return false;
+    const j = i + dir;
+    if (j < 0 || j >= ids.length) return true;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    setConfirm(null);
+    view.picker = null;
+    view.pacer = null;
+    commitOrder(ids);
+    render({});
+    return true;
+  }
+
+  // Drag: press and hold a live row (250 ms with a mouse or pen, 450 ms with a finger; moving more than SLOP first is a
+  // scroll or a click, not a hold). The row lifts (scale, a plate with a shadow under it and its sub-agents), its blob
+  // widens its eyes and stretches with the drag speed (a soft spring, so it wobbles a little when the drag stops). The
+  // other rows glide out of the way (translate only). Drop: the rows land in the new order (FLIP: drawn in the new
+  // order, then each slides from where it was) with a short spring that takes over the release speed, then one reorder
+  // goes out. Escape, a pointercancel or a drop well outside the list glides everything back. Reduced motion: no scale
+  // or wobble, and every move is instant.
+  const HOLD_MS = 250;
+  const HOLD_TOUCH_MS = 450;
+  const SLOP = 8;
+  const drag = { phase: null, id: null, pid: null, x0: 0, y0: 0, timer: null, touch: false, list: null, rect: null, blocks: [],
+    from: -1, to: -1, dy: 0, out: false, samples: [], plate: null, av: null, raf: 0, jelly: { s: 0, v: 0, t: 0 }, noClick: 0,
+    deferred: false, settleTimer: null };
+  const listKids = () => view.tree?.kids?.find((k) => k.key === 'list')?.kids ?? [];
+  // The live rows as blocks: a row and what hangs under it (its sub-agents; menus are closed on lift).
+  function blocksNow() {
+    const live = new Set(view.liveIds.map(String));
+    const out = [];
+    for (const it of listKids()) {
+      const k = String(it.key ?? '');
+      if (k.startsWith('row:') && live.has(k.slice(4))) out.push({ id: k.slice(4), nodes: [it.node] });
+      else if (k === 'grp' || k.startsWith('row:')) break;
+      else if (out.length && it.node) out[out.length - 1].nodes.push(it.node);
+    }
+    for (const b of out) {
+      const last = b.nodes[b.nodes.length - 1];
+      b.top = b.nodes[0].offsetTop || 0;
+      b.h = Math.max(1, (last.offsetTop || 0) + (last.offsetHeight || 0) - b.top);
+      b.shift = 0;
+    }
+    return out;
+  }
+  function onDown(e) {
+    if (drag.phase || view.screen !== 'main' || view.rename) return;
+    if ((e.button ?? 0) !== 0 || e.isPrimary === false) return;
+    if (e.target?.closest?.('button, input, [data-do]')) return;
+    const key = e.target?.closest?.('.row[data-key]')?.getAttribute('data-key') ?? '';
+    const id = key.startsWith('row:') ? key.slice(4) : null;
+    const a = id && view.liveIds.some((x) => String(x) === id) ? findAgent(id) : null;
+    if (!a || rowState(a) === 'ended') return;
+    Object.assign(drag, { phase: 'hold', id, pid: e.pointerId, x0: e.clientX ?? 0, y0: e.clientY ?? 0, touch: e.pointerType === 'touch' });
+    drag.timer = setTimeout(lift, drag.touch ? HOLD_TOUCH_MS : HOLD_MS);
+  }
+  function cancelHold() {
+    clearTimeout(drag.timer);
+    drag.timer = null;
+    if (drag.phase === 'hold') drag.phase = null;
+  }
+  function lift() {
+    drag.timer = null;
+    if (drag.phase !== 'hold') return;
+    if (!view.shown || document.hidden) { drag.phase = null; return; }
+    if (view.confirm || view.picker || view.pacer || view.tapKey) {
+      setConfirm(null);
+      view.picker = null;
+      view.pacer = null;
+      view.tapKey = null;
+      render({});
+    }
+    const blocks = blocksNow();
+    const from = blocks.findIndex((b) => b.id === drag.id);
+    const list = listNode();
+    if (from < 0 || !list || blocks.length < 2) { drag.phase = null; return; }
+    const r = list.getBoundingClientRect?.() ?? {};
+    Object.assign(drag, { phase: 'on', list, blocks, from, to: from, dy: 0, out: false, rect: r, samples: [{ t: Date.now(), y: drag.y0 }] });
+    list.classList.add('arranging');
+    const b = blocks[from];
+    for (const n of b.nodes) n.classList.add('carried');
+    b.nodes[0].classList.add('lift');
+    try { b.nodes[0].setPointerCapture?.(drag.pid); } catch { /* the pointer is gone */ }
+    const plate = make('<div class="plate" aria-hidden="true"></div>');
+    if (plate?.style) {
+      plate.style.top = `${b.top}px`;
+      plate.style.height = `${b.h}px`;
+      list.appendChild(plate);
+      drag.plate = plate;
+      // one frame later, so the plate fades and grows in instead of appearing
+      if (typeof requestAnimationFrame === 'function' && motionOk()) requestAnimationFrame(() => plate.classList.add('on'));
+      else plate.classList.add('on');
+    }
+    drag.av = b.nodes[0].querySelector?.('.av') ?? null;
+    if (motionOk()) startJelly();
+    if (drag.touch) try { window.navigator?.vibrate?.(8); } catch { /* no haptics */ }
+  }
+  // Past the first or last slot the row follows less and less (rubber band), instead of hitting a wall.
+  const band = (over, dim) => (over * dim * 0.55) / (dim + 0.55 * Math.abs(over));
+  function onMove(e) {
+    if (!drag.phase || e.pointerId !== drag.pid) return;
+    if (drag.phase === 'hold') {
+      if (Math.hypot((e.clientX ?? 0) - drag.x0, (e.clientY ?? 0) - drag.y0) > SLOP) cancelHold();
+      return;
+    }
+    if (drag.phase !== 'on') return;
+    e.preventDefault?.();
+    const y = e.clientY ?? drag.y0;
+    const now = Date.now();
+    drag.samples.push({ t: now, y });
+    while (drag.samples.length > 2 && now - drag.samples[0].t > 100) drag.samples.shift();
+    const { blocks, from } = drag;
+    const b = blocks[from];
+    const last = blocks[blocks.length - 1];
+    const lo = blocks[0].top - b.top;
+    const hi = last.top + last.h - b.h - b.top;
+    const raw = y - drag.y0;
+    drag.dy = raw < lo ? lo - band(lo - raw, b.h) : raw > hi ? hi + band(raw - hi, b.h) : raw;
+    const r = drag.rect ?? {};
+    const x = e.clientX ?? drag.x0;
+    drag.out = [r.left, r.right, r.top, r.bottom].every(finite) && (x < r.left - 24 || x > r.right + 24 || y < r.top - 40 || y > r.bottom + 40);
+    const mid = b.top + drag.dy + b.h / 2;
+    let to = from;
+    if (!drag.out) {
+      to = 0;
+      blocks.forEach((o, i) => { if (i !== from && o.top + o.h / 2 < mid) to += 1; });
+    }
+    drag.to = to;
+    const t = `0 ${drag.dy.toFixed(1)}px`;
+    for (const n of b.nodes) n.style.translate = t;
+    if (drag.plate) {
+      drag.plate.style.translate = t;
+      drag.plate.classList.toggle('out', drag.out);
+    }
+    b.nodes[0].classList.toggle('out', drag.out);
+    blocks.forEach((o, i) => {
+      if (i === from) return;
+      const shift = from < i && i <= to ? -b.h : to <= i && i < from ? b.h : 0;
+      if (shift === o.shift) return;
+      o.shift = shift;
+      for (const n of o.nodes) n.style.translate = shift ? `0 ${shift}px` : '';
+    });
+  }
+  function onUp(e) {
+    if (!drag.phase || (e.pointerId !== undefined && e.pointerId !== drag.pid)) return;
+    if (drag.phase === 'hold') return cancelHold();
+    if (drag.phase === 'on') finishDrag(e.type !== 'pointercancel' && !drag.out);
+  }
+  // The release speed in px/s, from the last ~100 ms of moves (0 when the pointer rested).
+  function speed() {
+    const s = drag.samples;
+    if (s.length < 2 || Date.now() - s[s.length - 1].t > 80) return 0;
+    const dt = s[s.length - 1].t - s[0].t;
+    return dt > 0 ? ((s[s.length - 1].y - s[0].y) / dt) * 1000 : 0;
+  }
+  // Keyframes of a damped spring from x0 (px) to 0, starting at v0 (px/s). zeta 1: no overshoot (a cancel); 0.8: a
+  // little, because the drop carried momentum.
+  function springFrames(x0, v0, zeta, response = 0.3) {
+    const w = (2 * Math.PI) / response;
+    const dt = 1 / 240;
+    let x = x0;
+    let v = clamp(v0, -2500, 2500);
+    const xs = [x];
+    for (let f = 0; f < 60; f++) {
+      for (let k = 0; k < 4; k++) {
+        v += (-w * w * x - 2 * zeta * w * v) * dt;
+        x += v * dt;
+      }
+      xs.push(x);
+      if (Math.abs(x) < 0.3 && Math.abs(v) < 10) break;
+    }
+    xs[xs.length - 1] = 0;
+    return { frames: xs.map((n) => ({ translate: `0 ${n.toFixed(2)}px` })), ms: Math.round(((xs.length - 1) * 1000) / 60) };
+  }
+  function finishDrag(commit) {
+    if (drag.phase !== 'on') return;
+    const { blocks, from, list, plate } = drag;
+    const to = commit ? drag.to : from;
+    const b = blocks[from];
+    const v = speed();
+    drag.noClick = Date.now();
+    stopJelly();
+    // Where every node is on screen now: its slot plus its translate (offsetTop ignores the translate).
+    const was = new Map();
+    blocks.forEach((o, i) => { for (const n of o.nodes) was.set(n, (n.offsetTop || 0) + (i === from ? drag.dy : o.shift)); });
+    const plateWas = b.top + drag.dy;
+    list.classList.remove('arranging'); // no translate transition while the rows are put in their new places
+    for (const n of was.keys()) n.style.translate = '';
+    b.nodes[0].classList.remove('lift');
+    b.nodes[0].classList.remove('out');
+    plate?.classList.remove('out');
+    drag.phase = null;
+    if (to !== from) {
+      const ids = blocks.map((o) => o.id);
+      ids.splice(to, 0, ...ids.splice(from, 1));
+      const rest = view.liveIds.map(String).filter((id) => !ids.includes(id)); // live rows that are not draggable (ended)
+      commitOrder([...ids, ...rest]);
+    }
+    const deferred = drag.deferred;
+    drag.deferred = false;
+    if (to !== from || deferred) render({});
+    // FLIP: each node slides from where it was to its new slot. The held block uses the spring, the others ease out.
+    const anim = motionOk();
+    let settleMs = 0;
+    for (const [n, y] of was) {
+      if (!n.parentNode) continue;
+      const d = y - (n.offsetTop || 0);
+      if (!anim || Math.abs(d) < 0.5) continue;
+      if (b.nodes.includes(n)) {
+        const sp = springFrames(d, v, commit ? 0.8 : 1);
+        n.animate?.(sp.frames, { duration: sp.ms, easing: 'linear' });
+        settleMs = Math.max(settleMs, sp.ms);
+      } else n.animate?.([{ translate: `0 ${d}px` }, { translate: '0 0' }], { duration: SHIFT_MS, easing: EASE });
+    }
+    if (plate) {
+      const top = b.nodes[0].parentNode ? b.nodes[0].offsetTop || 0 : b.top;
+      plate.style.top = `${top}px`;
+      plate.style.translate = '';
+      const d = plateWas - top;
+      if (anim && Math.abs(d) >= 0.5) {
+        const sp = springFrames(d, v, commit ? 0.8 : 1);
+        plate.animate?.(sp.frames, { duration: sp.ms, easing: 'linear' });
+      }
+      plate.classList.remove('on'); // fades and shrinks back with the row
+    }
+    drag.phase = 'settle';
+    const done = () => {
+      drag.settleTimer = null;
+      for (const n of b.nodes) n.classList.remove('carried');
+      plate?.remove();
+      drag.plate = null;
+      drag.av = null;
+      drag.phase = null;
+      if (drag.deferred) {
+        drag.deferred = false;
+        render({});
+      }
+    };
+    if (anim) {
+      busy(Math.max(settleMs, 220));
+      drag.settleTimer = setTimeout(done, Math.max(settleMs, 220) + 20);
+    } else done();
+  }
+  // The held blob: stretches with the drag speed through a soft spring (it lags, then wobbles a little when the drag
+  // stops). Individual transform properties, so the breathe loop and the arrival squish (transform) still compose.
+  function startJelly() {
+    const j = drag.jelly;
+    const av = drag.av;
+    Object.assign(j, { s: 0, v: 0, t: 0 });
+    if (typeof requestAnimationFrame !== 'function' || !av?.style) return;
+    if (drag.raf) cancelAnimationFrame(drag.raf); // the last drop's blob is still settling
+    const step = (ts) => {
+      const dt = j.t ? Math.min(0.032, (ts - j.t) / 1000) : 1 / 60;
+      j.t = ts;
+      const target = drag.phase === 'on' ? Math.min(0.09, Math.abs(speed()) * 0.00006) : 0;
+      j.v += (260 * (target - j.s) - 16 * j.v) * dt;
+      j.s += j.v * dt;
+      if (drag.phase !== 'on' && Math.abs(j.s) < 0.002 && Math.abs(j.v) < 0.02) {
+        av.style.scale = '';
+        drag.raf = 0;
+        return;
+      }
+      av.style.scale = `${(1 - j.s * 0.5).toFixed(4)} ${(1 + j.s).toFixed(4)}`;
+      drag.raf = requestAnimationFrame(step);
+    };
+    drag.raf = requestAnimationFrame(step);
+  }
+  // On drop the loop keeps running until the blob is at rest (startJelly's step clears the style itself).
+  function stopJelly() {
+    if (!drag.raf && drag.av?.style) drag.av.style.scale = '';
+  }
+
   // ---------- actions ----------
   function send(msg) {
+    if (net.mode === 'http') return httpSend(msg);
     try {
       const h = window.webkit?.messageHandlers?.kadans;
       if (h) h.postMessage(msg);
@@ -1484,6 +2017,240 @@
     } catch (e) {
       console.log('kadans.send failed', e);
     }
+  }
+
+  // ---------- phone transport (k27) ----------
+  // In the Mac app the page talks to WKWebView's bridge (window.webkit.messageHandlers.kadans). Served by `kadans serve`
+  // to a phone there is no bridge: the page pairs once (#pair=<code> -> POST /api/pair -> a token kept in localStorage,
+  // the hash cleared), reads GET /api/state every 2 s while it is visible and hands it to render(), and sends the
+  // allow-listed actions to POST /api/action, whose answer goes to kadans.result(). A 401 anywhere drops the token and
+  // shows "Pair again". Nothing touches the network until a token or a pair code exists. One request at a time: polls
+  // never overlap, and actions go out in order.
+  const POLL_MS = 2000;
+  const TOKEN_KEY = 'kadans.token';
+  const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder']);
+  // net.state: 'idle' (bridge) | 'pairing' | 'live' | 'unpaired' (no token, or a 401) | 'offline' (the Mac did not answer)
+  // | 'off' (503: phone access is turned off on the Mac) | 'install' (k29: iOS Safari with a code, "Add to Home Screen")
+  // net.code: the pair code held back on the 'install' screen until "Use it in Safari instead" (never in the DOM).
+  const net = { mode: 'bridge', state: 'idle', token: null, timer: null, inflight: false, chain: null, failures: 0, why: null, code: null };
+  const store = {
+    get() { try { return window.localStorage?.getItem(TOKEN_KEY) || null; } catch { return null; } },
+    set(v) { try { if (v) window.localStorage?.setItem(TOKEN_KEY, v); else window.localStorage?.removeItem(TOKEN_KEY); } catch { /* private mode */ } },
+  };
+  const pageVisible = () => document.visibilityState !== 'hidden' && !document.hidden;
+  function deviceName() {
+    const ua = String(window.navigator?.userAgent ?? '');
+    const n = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone' : 'Phone';
+    return n.slice(0, 40);
+  }
+  async function call(method, path, body) {
+    const headers = { Accept: 'application/json' };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (net.token) headers.Authorization = `Bearer ${net.token}`;
+    const r = await window.fetch(path, { method, headers, cache: 'no-store', credentials: 'omit',
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    let json = null;
+    try { json = await r.json(); } catch { json = null; }
+    return { status: r.status, json };
+  }
+  function unpaired(why) {
+    net.token = null;
+    store.set(null);
+    net.state = 'unpaired';
+    net.why = why;
+    view.screen = 'main'; // "Pair again" lives on the main screen, also when the 401 came while Settings was open
+    view.stree = null;
+    clearTimeout(net.timer);
+    net.timer = null;
+    paint();
+  }
+  // Re-render whatever screen is showing (the phone's status card lives on the main screen).
+  function paint() {
+    if (view.screen === 'main') render({});
+    else renderScreen();
+  }
+  async function pair(code) {
+    net.state = 'pairing';
+    paint();
+    try {
+      const r = await call('POST', 'api/pair', { code, name: deviceName() });
+      if (r.status === 200 && typeof r.json?.token === 'string' && r.json.token) {
+        net.token = r.json.token;
+        store.set(net.token);
+        net.state = 'live';
+        net.why = null;
+        return poll();
+      }
+      return unpaired(r.status === 429 ? 'busy' : 'code');
+    } catch {
+      return unpaired('offline');
+    }
+  }
+  async function poll() {
+    clearTimeout(net.timer);
+    net.timer = null;
+    if (net.mode !== 'http' || !net.token || net.inflight) return;
+    if (net.state === 'install') return; // k29: the Add to Home Screen card waits for the owner, even with a Safari token
+    if (!pageVisible()) return; // visibilitychange polls again when the page comes back
+    net.inflight = true;
+    let next = POLL_MS;
+    try {
+      const r = await call('GET', 'api/state');
+      if (r.status === 401) return unpaired('revoked');
+      if (r.status === 503 || r.status === 429) {
+        // 503: phone access is off on the Mac; 429: too many requests. Keep the token, read again more slowly.
+        net.failures += 1;
+        next = Math.min(10_000, POLL_MS * (net.failures + 1));
+        const st = r.status === 503 ? 'off' : net.state === 'off' ? 'off' : 'live';
+        if (st !== net.state) {
+          net.state = st;
+          paint();
+        }
+      } else if (r.status === 200 && r.json && typeof r.json === 'object') {
+        const was = net.state;
+        net.state = 'live';
+        net.failures = 0;
+        render(r.json);
+        if (was !== 'live' && view.screen !== 'main') renderScreen();
+      } else throw new Error(`http ${r.status}`);
+    } catch {
+      net.failures += 1;
+      if (net.state !== 'offline') {
+        net.state = 'offline';
+        paint();
+      }
+      next = Math.min(10_000, POLL_MS * net.failures); // 2, 4, 6 … up to 10 s while the Mac is away
+    } finally {
+      net.inflight = false;
+    }
+    if (net.token && pageVisible()) net.timer = setTimeout(poll, next);
+  }
+  // Only the actions the server allows go out; the app-only ones are handled here or dropped.
+  function httpSend(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    let m = msg;
+    if (m.action === 'autopace') m = { action: 'config-set', key: 'autopace', value: String(m.on === true) };
+    if (m.action === 'retry' || m.action === 'check-again') { poll(); return; }
+    if (!HTTP_ACTIONS.has(m.action) || !net.token) return;
+    const go = async () => {
+      try {
+        const r = await call('POST', 'api/action', m);
+        if (r.status === 401) return unpaired('revoked');
+        if (r.json && typeof r.json === 'object') actionResult(r.json);
+        else actionResult({ action: m.action, id: m.id, ok: false, why: 'Kadans on your Mac did not accept this' });
+      } catch {
+        actionResult({ action: m.action, id: m.id, ok: false, why: 'Couldn’t reach your Mac' });
+      }
+      poll();
+    };
+    net.chain = (net.chain ?? Promise.resolve()).then(go, go);
+    return net.chain;
+  }
+  function onVisibility() {
+    if (document.hidden) {
+      cancelHold(); // a hold must not lift while the page is away
+      if (drag.phase === 'on') finishDrag(false);
+    }
+    scheduleBlinks();
+    if (net.mode !== 'http') return;
+    if (pageVisible()) poll();
+    else {
+      clearTimeout(net.timer);
+      net.timer = null;
+    }
+  }
+  // k29: iOS keeps a home-screen web app's storage apart from Safari's, so a token saved in Safari (where the camera opens
+  // the pair link) is not seen by the app added afterwards. Only iOS Safari sets navigator.standalone to false; Android
+  // and desktop browsers leave it undefined and share storage with an installed app, so they pair at once as before.
+  const displayMode = (m) => { try { return window.matchMedia?.(`(display-mode: ${m})`)?.matches === true; } catch { return false; } };
+  const standaloneApp = () => window.navigator?.standalone === true || displayMode('standalone') || displayMode('fullscreen');
+  const iosSafari = () => window.navigator?.standalone === false && !standaloneApp();
+  // The manifest link: manifest.webmanifest?pair=<code> makes the app added to the Home Screen start at /#pair=<code>.
+  function manifestCode(code) {
+    try {
+      const l = document.querySelector('link[rel="manifest"]');
+      l?.setAttribute?.('href', code ? `manifest.webmanifest?pair=${encodeURIComponent(code)}` : 'manifest.webmanifest');
+    } catch { /* no manifest link */ }
+  }
+  function clearHash() {
+    try {
+      if (/[#&]pair=/.test(window.location.hash ?? '')) window.history?.replaceState?.(null, '', window.location.pathname + window.location.search);
+    } catch { /* no history API */ }
+  }
+  // "Use it in Safari instead": pair here with the held code, as before k29; the plain manifest comes back, so an app
+  // added later does not start on a spent code.
+  function pairHere() {
+    const code = net.code;
+    if (net.state !== 'install' || !code) return;
+    net.code = null;
+    manifestCode(null);
+    clearHash();
+    pair(code);
+  }
+  // HTTP mode only: top-level page, http(s), no bridge. Starts pairing or polling; with neither a code nor a token it
+  // shows "Pair again" and makes no request. In iOS Safari a code is held back for the home-screen app (the hash stays,
+  // in case an iOS version adds the page URL instead of the manifest's start_url) and nothing is sent.
+  function startHttp() {
+    let code = null;
+    try {
+      const m = /[#&]pair=([A-Za-z2-7]{8,64})\b/.exec(window.location.hash ?? '');
+      if (m) code = m[1].toUpperCase();
+    } catch { /* no location */ }
+    net.mode = 'http';
+    document.documentElement.dataset.shell = 'phone';
+    net.token = store.get();
+    if (code && iosSafari()) {
+      net.code = code;
+      manifestCode(code);
+      net.state = 'install';
+      net.why = null;
+      return paint();
+    }
+    clearHash();
+    // The home-screen app opens its start_url (/#pair=<code>) on every cold launch; once it holds a token that code is
+    // spent, so it is ignored rather than sent again (a 401 would drop the good token).
+    if (code && net.token && standaloneApp()) code = null;
+    if (code) return pair(code);
+    if (net.token) {
+      net.state = 'live';
+      return poll();
+    }
+    return unpaired('new');
+  }
+  function wantsHttp() {
+    try {
+      if (window.webkit?.messageHandlers?.kadans) return false;
+      if (window.top !== window) return false; // dev.html's frame (its bridge stand-in comes after load)
+      if (!/^https?:$/.test(window.location.protocol)) return false;
+      return !/[?&](debugFrames|dev)\b/.test(window.location.search);
+    } catch { return false; }
+  }
+  // The phone's own status card: pairing, pair again, or the Mac not answering. Null when live.
+  // The iOS Share glyph (a box with an arrow up), so "Tap Share" points at the button people know.
+  const SHARE_ICON = '<svg class="share" width="13" height="16" viewBox="0 0 13 16" fill="none" stroke="currentColor" stroke-width="1.4" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5v8.5M3.8 4.2 6.5 1.5l2.7 2.7"/>' +
+    '<path d="M4.3 6.5H2.8a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h7.4a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1H8.7"/></svg>';
+  function phoneCard() {
+    if (net.mode !== 'http') return null;
+    if (net.state === 'pairing') return { key: 'net', html: msgCard('wait', 'Pairing…', 'Connecting to Kadans on your Mac.', '') };
+    if (net.state === 'install') {
+      return { key: 'net', html: msgCard('idle', 'Add Kadans to your Home Screen',
+        `Tap Share ${SHARE_ICON}, then Add to Home Screen. Open it from there.`,
+        '<button class="pill quiet" data-do="pair-here" data-key="pair-here">Use it in Safari instead</button>') };
+    }
+    if (net.state === 'unpaired') {
+      const why = { code: 'That code didn’t work: each code works once, within 10 minutes. ', busy: 'Too many tries: wait a minute. ',
+        offline: 'Couldn’t reach your Mac. ' }[net.why] ?? '';
+      const title = net.why === 'new' ? 'Pair this phone' : 'Pair again';
+      return { key: 'net', html: msgCard('idle', title, `${esc(why)}Scan the code in Kadans on your Mac (Settings\u00a0›\u00a0Phone).`, '') };
+    }
+    if (net.state === 'off') {
+      return { key: 'net', html: '<div class="note net-off" role="status"><i class="dot-gray"></i><span>Phone access is off on your Mac</span></div>' };
+    }
+    if (net.state === 'offline') {
+      return { key: 'net', html: '<div class="note net-off" role="status"><i class="dot-orange"></i><span>Can’t reach your Mac · trying again</span></div>' };
+    }
+    return null;
   }
 
   function setConfirm(id, kind = 'stop', task = null) {
@@ -1501,8 +2268,33 @@
     return r.dataset.theme;
   }
 
+  // k27: touch screens have no hover. A tap on a row (not on one of its buttons) shows its actions, a tap on the same
+  // row or anywhere else hides them again. A button inside the open row keeps it open.
+  const touchUi = () => {
+    if (net.mode === 'http') return true;
+    try { return matchMedia('(hover: none)').matches; } catch { return false; }
+  };
+  function onTap(e, b) {
+    if (!touchUi() || view.screen !== 'main') return false;
+    const row = e.target?.closest?.('.row[data-key]') ?? null;
+    const key = row && !row.classList?.contains('grp') ? row.getAttribute('data-key') : null;
+    if (b && key && key === view.tapKey) return false; // a button in the open row
+    const next = !b && key && key !== view.tapKey ? key : null;
+    if (next === view.tapKey) return false;
+    view.tapKey = next;
+    if (!b) {
+      view.picker = null; // a tap elsewhere also closes an open menu
+      view.pacer = null;
+      render({});
+      return true;
+    }
+    return false; // the button's own handler renders
+  }
   function onClick(e) {
+    if (drag.noClick && Date.now() - drag.noClick < 500) { drag.noClick = 0; return; } // the release of a drag
+    if (e.target?.classList?.contains?.('rn')) return; // typing a name
     const b = e.target.closest('[data-do]');
+    if (onTap(e, b)) return;
     if (!b || b.getAttribute('aria-disabled') === 'true') return;
     if (onScreenClick(b)) return;
     const id = b.dataset.id;
@@ -1556,6 +2348,7 @@
         break;
       }
       case 'open': send({ action: 'open', id }); return;
+      case 'rename': startRename(id); return;
       case 'dismiss': {
         view.dismissed.add(id);
         send({ action: 'dismiss', id });
@@ -1607,6 +2400,14 @@
         return true;
       }
       case 'uninstall': view.uninstallOpen = !view.uninstallOpen; renderScreen(); return true;
+      case 'phone-on': case 'phone-off':
+        view.phoneWant = { on: b.dataset.do === 'phone-on', at: Date.now() };
+        send({ action: b.dataset.do });
+        renderScreen();
+        return true;
+      case 'phone-pair': send({ action: 'phone-pair' }); return true;
+      case 'pair-here': pairHere(); return true;
+      case 'phone-revoke': if (b.dataset.id) send({ action: 'phone-revoke', id: b.dataset.id }); return true;
       case 'apply': view.applyConfirm = true; renderScreen(); root().querySelector('[data-do="apply-go"]')?.focus(); return true;
       case 'apply-cancel': view.applyConfirm = false; renderScreen(); root().querySelector('[data-do="apply"]')?.focus(); return true;
       case 'apply-go':
@@ -1653,6 +2454,21 @@
   }
 
   function onKey(e) {
+    // k32: the rename input owns Enter and Escape; a held row owns Escape; Alt+Up/Down moves the focused row.
+    if (view.rename && e.target?.classList?.contains?.('rn')) {
+      if (e.isComposing) return;
+      if (e.key === 'Enter') { e.preventDefault?.(); endRename(true); } else if (e.key === 'Escape') { e.preventDefault?.(); endRename(false); }
+      return;
+    }
+    if (drag.phase && e.key === 'Escape') {
+      if (drag.phase === 'on') { e.preventDefault?.(); finishDrag(false); return; }
+      cancelHold();
+    }
+    if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && view.screen === 'main' && !drag.phase) {
+      const key = document.activeElement?.getAttribute?.('data-key') ?? '';
+      if (key.startsWith('row:') && keyMove(key.slice(4), e.key === 'ArrowUp' ? -1 : 1)) e.preventDefault?.();
+      return;
+    }
     if (e.key !== 'Escape') return;
     if (view.screen !== 'main') {
       if (view.applyConfirm) {
@@ -1692,6 +2508,18 @@
     el.addEventListener('input', onInput);
     el.addEventListener('change', onChange);
     el.addEventListener('pointerdown', onPointer);
+    el.addEventListener('pointerdown', onDown);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+    // once a row is lifted on a touch screen the page must not scroll under the finger (touch-action cannot change
+    // mid-gesture; a non-passive touchmove can still stop it)
+    document.addEventListener('touchmove', (e) => { if (drag.phase === 'on') e.preventDefault(); }, { passive: false });
+    el.addEventListener('contextmenu', (e) => { if (drag.phase) e.preventDefault(); });
+    el.addEventListener('dblclick', onDbl);
+    // the system took the pointer (a gesture, a window change): put the row back
+    el.addEventListener('lostpointercapture', (e) => { if (drag.phase === 'on' && e.pointerId === drag.pid) finishDrag(false); });
+    el.addEventListener('focusout', (e) => { if (view.rename && e.target?.classList?.contains?.('rn')) endRename(false); });
     document.addEventListener('pointerup', onPointer);
     document.addEventListener('pointercancel', onPointer);
     el.addEventListener('scroll', (e) => { if (e.target.id === 'k-list') fade(e.target); }, true);
@@ -1699,7 +2527,10 @@
     el.addEventListener('mouseover', onArrive);
     el.addEventListener('focusin', onArrive);
     el.addEventListener('mouseleave', () => { view.hoverKey = null; });
-    document.addEventListener('visibilitychange', scheduleBlinks);
+    document.addEventListener('visibilitychange', onVisibility);
+    // Taps outside the panel (the phone's page margin) close an open row too.
+    document.addEventListener('click', (e) => { if (view.tapKey && !el.contains(e.target)) { view.tapKey = null; render({}); } });
+    if (wantsHttp()) startHttp();
   }
 
   // ---------- dev-only frame probe (k14) ----------
@@ -1751,12 +2582,24 @@
     view.idleOpen = false;
     view.compact = null;
     view.result = null;
+    view.phoneWant = null;
+    view.tapKey = null;
+    view.rename = null;
+    view.titles.clear();
+    view.order = null;
     setConfirm(null);
   }
   // The host says when the popover opens and closes (WKWebView does not reliably report document.hidden for a closed
   // NSPopover): closed, the blink timer stops and nothing animates.
   function visible(on) {
+    // k27/k28: closing the popover on Settings ends the app's device polling; reopening on Settings starts it again.
+    if (net.mode === 'bridge' && view.screen !== 'main' && (on !== false) !== view.shown) send({ action: on !== false ? 'settings' : 'settings-closed' });
     view.shown = on !== false;
+    if (!view.shown) {
+      cancelHold();
+      if (drag.phase === 'on') finishDrag(false);
+    }
+    if (!view.shown && view.rename) endRename(false); // closing the popover never saves a half-typed name
     // Opening or closing the popover drops focus: a row focused earlier (a click, or a restore after a refresh) would
     // otherwise come back highlighted, ring and actions showing, the next time the popover opens.
     const a = document.activeElement;
@@ -1764,7 +2607,10 @@
     view.focusKey = null;
     scheduleBlinks();
   }
-  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats, blinkState, staleReading };
+  // net: read-only view of the phone transport for tests ({ mode, state, token }).
+  const netState = () => ({ mode: net.mode, state: net.state, token: net.token, why: net.why, polling: net.timer !== null, tapKey: view.tapKey });
+  window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats, blinkState, staleReading, netState, startHttp,
+    arrangeState: () => ({ phase: drag.phase, from: drag.from, to: drag.to, out: drag.out, order: view.order?.ids ?? null, rename: view.rename?.id ?? null }) };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();

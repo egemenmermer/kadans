@@ -149,7 +149,7 @@ test('install adds the pace hooks (every tool, 60 s pre timeout) next to Orca ho
   assert.equal(pre.hooks[0].timeout, 60);
   assert.equal(post.matcher, '*');
   assert.deepEqual(s.hooks.PreToolUse[0], FIXTURE.hooks.PreToolUse[0]); // Orca's stays first
-  assert.equal(s.hooks.PreToolUse.length, 3);
+  assert.equal(s.hooks.PreToolUse.length, 3); // Orca, pretool, pace-pre
   // an install that predates k6 gains exactly the two pace groups
   const old = JSON.parse(JSON.stringify(s));
   old.hooks.PreToolUse = old.hooks.PreToolUse.filter((g) => g !== pre && !g.hooks.some((h) => /pace-pre/.test(h.command)));
@@ -240,4 +240,11 @@ test('the old double-quoted install form still counts as ours (no duplicates on 
   const up = mergeSettings(old, kadansCommand('/Users/me/Projects/kadans/bin/kadans.mjs')).settings;
   assert.deepEqual(up, old);
   assert.deepEqual(unmergeSettings(old, FIXTURE.statusLine), FIXTURE);
+});
+
+test('install adds no separate lean hooks: lean runs inside hook event / pace-pre / pace-post', () => {
+  const { settings: s } = mergeSettings(FIXTURE, CMD);
+  const leanGroups = Object.values(s.hooks).flat().filter((g) => g.hooks.some((h) => / hook lean$/.test(h.command)));
+  assert.equal(leanGroups.length, 0);
+  assert.deepEqual(unmergeSettings(s, FIXTURE.statusLine), FIXTURE);
 });

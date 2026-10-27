@@ -84,6 +84,13 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     var onAgents: ((Any) -> Void)?
     /// k25: the config of every full refresh (`config get --json`), so the spare-quota check follows a Settings flip at once.
     var onConfig: ((Any) -> Void)?
+    /// k28: phone control (serve, pairing, devices). nil in snapshot mode: the phone actions are then ignored.
+    var phone: Phone? {
+        didSet { phone?.onChange = { [weak self] in self?.phoneChanged() } }
+    }
+    /// k28: the page sent "settings" and the popover has not closed since. The page sends no "back" notice, so this
+    /// stays true until the popover closes. While true, every refresh carries {phone} (and `devices --json` while on).
+    private(set) var settingsOpen = false
 
     init(theme: String? = nil) {
         self.theme = (theme == "light" || theme == "dark") ? theme : nil
@@ -119,6 +126,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
 
     override func viewDidDisappear() {
         super.viewDidDisappear()
+        settingsOpen = false
         if loaded { evaluate("window.kadans && window.kadans.visible && window.kadans.visible(false); true;") }
     }
 
@@ -209,7 +217,11 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
             return
         }
         refreshing = true
+        // k28: the device list while Settings is open: on every refresh while phone is on, else on full ones only.
+        let wantDevices = phone != nil && settingsOpen && (full || phone?.on == true)
+        let withPhone = phone != nil && (settingsOpen || full)
         DispatchQueue.global(qos: .utility).async {
+            let devices = wantDevices ? Phone.fetchDevices() : nil
             let s = CLI.run(["status", "--json"])
             let a = CLI.run(["agents", "--json"])
             if !s.ok { log("status --json failed (code \(s.code), timeout \(s.timedOut)): \(s.err)") }
@@ -233,6 +245,8 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 self.onStatus?(status)
                 var payload: [String: Any] = ["status": status ?? NSNull(), "agents": agents]
                 payload.merge(extra) { _, new in new }
+                if wantDevices { self.phone?.noteDevices(devices) }
+                if withPhone, let ph = self.phone { payload.merge(ph.payload()) { _, new in new } }
                 self.push(payload)
                 completion?()
                 if self.wantFull {
@@ -300,6 +314,18 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         }
     }
 
+    // MARK: phone (k28)
+
+    func pushPhone() {
+        guard let phone, loaded, !fixtureOnly else { return }
+        push(phone.payload())
+    }
+
+    /// The serve child started or died: the page hears it only while Settings is open (the next refresh carries it anyway).
+    private func phoneChanged() {
+        if settingsOpen { pushPhone() }
+    }
+
     // MARK: messages from the page
 
     /// A string id from the latest `agents --json` list that cannot be read as a flag.
@@ -314,6 +340,22 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         let d = n.doubleValue
         guard d.isFinite, d >= 1, d <= 1_000_000_000, d.rounded() == d else { return nil }
         return Int(d)
+    }
+
+    /// k31: a rename title, as lib/serve.mjs titleArg: control and invisible characters (Cc, Cf; newline and tab kept)
+    /// stripped, trimmed, at most 80 characters (unicode scalars, like JS code points); "" clears. A "--" start is refused
+    /// (the CLI would read it as a flag).
+    static func titleArg(_ v: Any?) -> String? {
+        guard let raw = v as? String, raw.unicodeScalars.count <= 320 else { return nil }
+        var kept = String.UnicodeScalarView()
+        for u in raw.unicodeScalars {
+            let cat = u.properties.generalCategory
+            if (cat == .control || cat == .format) && u != "\n" && u != "\t" { continue }
+            kept.append(u)
+        }
+        let t = String(kept).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.unicodeScalars.count <= 80, !t.hasPrefix("--") else { return nil }
+        return t
     }
 
     /// Opening a session can wait on Orca (up to 30 s), hence the longer timeout for start and replace.
@@ -359,7 +401,13 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
             sizeFromPage(min(Self.maxHeight, max(60, ceil(CGFloat(h)))))
         case "close":
             onClose?()
-        case "retry", "check-again", "settings":
+        case "settings":
+            settingsOpen = true
+            refresh(full: true)
+        case "settings-closed":
+            // The page left Settings: stop the per-refresh `devices --json` run until it opens again.
+            settingsOpen = false
+        case "retry", "check-again":
             // Re-runs the read-only commands (plus config get and install --json); no page data reaches the CLI.
             refresh(full: true)
         case "install-preview":
@@ -421,6 +469,25 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 args += ["--until", u]
             }
             runThenRefresh(args)
+        case "rename":
+            // k31: the owner's title for a row ("" clears it); `kadans agent title` stores it.
+            guard let id = agentId(body["id"]), let title = Self.titleArg(body["title"]) else {
+                log("ignored rename: agent id not in the current list or title is not text of at most 80 characters")
+                return
+            }
+            runThenRefresh(["agent", "title", id, title], result: ("rename", id))
+        case "reorder":
+            // k31: the new row order after a drag: 1 to 50 different ids, all in the latest agents list.
+            guard let list = body["ids"] as? [Any], (1...50).contains(list.count) else {
+                log("ignored reorder: ids is not a list of 1 to 50 agent ids")
+                return
+            }
+            let ids = list.compactMap { agentId($0) }
+            guard ids.count == list.count, Set(ids).count == ids.count else {
+                log("ignored reorder: ids must be different agent ids from the current list")
+                return
+            }
+            runThenRefresh(["agent", "order"] + ids, result: ("reorder", ""))
         case "autopace":
             // A real JSON boolean only (NSNumber 0/1 would also bridge to Bool).
             guard let n = body["on"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else {
@@ -428,6 +495,23 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 return
             }
             runThenRefresh(["autopace", n.boolValue ? "on" : "off"])
+        // k28: phone control. Nothing from the page reaches the CLI except a device id from the latest list.
+        case "phone-on", "phone-off":
+            guard let phone else { return }
+            settingsOpen = true
+            phone.turn(on: action == "phone-on") { [weak self] in
+                self?.pushPhone()
+                self?.refresh(full: true)
+            }
+        case "phone-pair":
+            guard let phone else { return }
+            settingsOpen = true
+            phone.makePair { [weak self] in self?.pushPhone() }
+        case "phone-revoke":
+            guard let phone else { return }
+            settingsOpen = true
+            guard let id = phone.knownDevice(body["id"]) else { log("ignored phone-revoke: id is not in the current devices list"); return }
+            phone.revoke(id) { [weak self] in self?.pushPhone() }
         default:
             log("ignored action \"\(action)\" (not on the allow-list)")
         }

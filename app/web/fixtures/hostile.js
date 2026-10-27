@@ -33,6 +33,10 @@
       A('fx-0204', { project: IMG, status: 'idle', lastSeen: N - 12 * M, firstPrompt: AMP,
         context: { tokens: 150000, window: 200000, pct: 75, advice: 'now', why: `${IMG}${QUOTE}` },
         orca: { terminal: 'term_fx204', worktree: AMP, repo: IMG, state: 'idle', title: null, ambiguous: false } }),
+      // k38: an agent on another computer, hostile machine name and title
+      A(`remote:${IMG}:p1`, { source: 'orca', machine: `${IMG}${QUOTE}`, project: AMP, model: null, tokens: null, pid: null, firstPrompt: null,
+        title: SCRIPT, machineStale: true, machineOffline: false, orca: { terminal: null, worktree: null, repo: null, state: 'working', title: null, ambiguous: false } }),
+      A(`remote:${AMP}`, { source: 'orca', machine: AMP, machineOffline: true, pid: null, firstPrompt: null, orca: null }),
       A('fx-0205', { project: AMP, status: 'idle', lastSeen: N - 9 * M, firstPrompt: QUOTE,
         context: { tokens: 130000, window: 200000, pct: 65, advice: 'now', why: `${BREAK}${SCRIPT}` } }),
     ],

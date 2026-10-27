@@ -51,6 +51,7 @@ node bin/kadans.mjs install --apply    # write the changes, after a backup
 | `Stop` hook | Throttle: can hand one approved task to a session when part of your limit would go unused. Off unless you opt in. |
 | `PreToolUse` on `Agent` and `Workflow` | Brake: holds new sub-agents and workflows while the brake is on. |
 | `PreToolUse` and `PostToolUse` on every tool | Pace: waits before a tool call if you slowed that session, halts it if you paused it. Auto-pace adds a short note when usage runs hot. |
+| `SessionStart`, `PreToolUse` on `Read`, `PostToolUse` on `Bash`, `Read`, `Grep` | Lean mode (on by default, `kadans config set lean false` turns it off): a short token-saving brief at session start, a note when an agent re-reads an unchanged file, a note after very large output. Notes only, never blocks. |
 | Session events and `Notification` | A small event log, so the agent list knows what runs and what needs you. |
 
 Every hook fails open: if Kadans errors, Claude Code carries on as if it were not there.

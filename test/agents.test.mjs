@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, statSync, utimesSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,11 +20,13 @@ import {
   readHosted,
   renderAgents,
   runEvent,
+  scanSubagent,
   scanTranscript,
   sessionStatus,
   stopAgent,
 } from '../lib/agents.mjs';
 import { appendSample } from '../lib/samples.mjs';
+import { applyOrder, readOrder, setOrder } from '../lib/order.mjs';
 
 const BIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'kadans.mjs');
 const NOW = Date.parse('2026-10-26T12:00:00Z');
@@ -376,10 +378,13 @@ test('listAgents: fields, tokens, subagents, Orca match and Orca-only agents; en
     stale: false,
     account: 'acct',
     pace: { mode: 'none', until: null },
+    lean: { rereads: 0, bigOutputs: 0 },
+    progress: null,
     title: 'Agents list', // no Claude Code title in the transcript: the Orca tab title again (k24), before the prompt
     titleSource: 'orca',
     firstPrompt: 'Build the agents list for the menu bar',
-    subagents: [{ id: 'a1', type: 'Explore', description: 'Find the hook formats', status: 'running' }],
+    subagents: [{ id: 'a1', type: 'Explore', description: 'Find the hook formats', status: 'running', tokens: null, context: null, progress: null }], // no sub-agent transcript yet
+    subagentTokens: null,
     pid: 4242,
     pidAt: NOW - 9 * MIN, // the SessionStart that recorded the pid
     orca: { terminal: 'term_A', worktree: 'k3-agents', repo: 'kadans', state: 'working', title: null },
@@ -517,4 +522,124 @@ test('stopAgent: a pid reused by another claude process after it was recorded is
   assert.equal(stopAgent(agent, { ps, kill, started: () => NOW - 30 * MIN }).ok, true);
   assert.equal(stopAgent(agent, { ps, kill, started: () => NOW + 5500 }).ok, true);
   assert.deepEqual(kills, [[11, 'SIGTERM'], [11, 'SIGTERM']]);
+});
+
+// k31: sub-agent numbers from <transcript dir>/<sid>/subagents/agent-<id>.jsonl (sidechain lines throughout).
+const side = (row) => ({ ...row, isSidechain: true, agentId: 'a1' });
+
+test('scanSubagent: sidechain usage counted once per message id, newest context, incremental', () => {
+  const f = join(tmp(), 'agent-a1.jsonl');
+  writeFileSync(f, jsonl([side(user('Find the hook formats')), side(asst('m1', 'claude-haiku-5', U(10, 5, 100, 400))), side(asst('m1', 'claude-haiku-5', U(10, 7, 100, 400)))]));
+  const st = scanSubagent(f, null);
+  assert.deepEqual([st.done + st.cur, st.ctx], [117, 510]);
+  assert.equal(Object.hasOwn(st, 'firstPrompt') || Object.hasOwn(st, 'promptRaw'), false, 'numbers only: no prompt kept');
+  appendFileSync(f, jsonl([side(asst('m2', 'claude-haiku-5', U(3, 2, 0, 600))), side(asst('m3', '<synthetic>', U(0, 0, 0, 0)))]));
+  const next = scanSubagent(f, st);
+  assert.deepEqual([next.done + next.cur, next.ctx], [122, 603]);
+  assert.equal(scanSubagent(f, next), next, 'unchanged file: the cached state itself');
+  assert.equal(scanSubagent(join(tmp(), 'missing.jsonl'), null), null);
+});
+
+test('listAgents: sub-agent tokens and context, their sum, cache hit without a read, hostile ids ignored', () => {
+  const { home, proj, t } = fixtureHome();
+  const sub = join(dirname(t), 's1', 'subagents', 'agent-a1.jsonl');
+  writeFileSync(sub, jsonl([side(asst('x1', 'claude-haiku-5', U(40, 10, 50, 300)))]));
+  appendEvent(home, { t: NOW - 6 * MIN, ev: 'SubagentStart', agentId: 'a2', agentType: 'Plan', sid: 's1', cwd: proj, transcript: t }, NOW);
+  appendEvent(home, { t: NOW - 6 * MIN, ev: 'SubagentStart', agentId: '../../s1', agentType: 'Plan', sid: 's1', cwd: proj, transcript: t }, NOW);
+  const row = listAgents(home, { now: NOW, alive: () => true })[0];
+  assert.deepEqual(row.subagents.map((a) => [a.id, a.tokens, a.context]), [['a1', 100, 390], ['a2', null, null], ['../../s1', null, null]]);
+  assert.equal(row.subagentTokens, 100);
+  const cache = JSON.parse(readFileSync(join(home, 'agents-cache.json'), 'utf8'));
+  assert.deepEqual(Object.keys(cache).sort(), ['s1', 's1/a1']);
+  // cache hit: same size and mtime -> the file is not read (different bytes of the same length stay unseen)
+  const { mtimeMs, size } = statSync(sub);
+  const swapped = jsonl([side(asst('x1', 'claude-haiku-5', U(90, 10, 50, 300)))]);
+  assert.equal(Buffer.byteLength(swapped), size);
+  writeFileSync(sub, swapped);
+  utimesSync(sub, new Date(mtimeMs), new Date(mtimeMs));
+  assert.equal(listAgents(home, { now: NOW, alive: () => true })[0].subagentTokens, 100);
+  // grown: only the new bytes are read
+  appendFileSync(sub, jsonl([side(asst('x2', 'claude-haiku-5', U(1, 1, 1, 0)))]));
+  const again = listAgents(home, { now: NOW, alive: () => true })[0];
+  assert.deepEqual([again.subagentTokens, again.subagents[0].context], [103, 2]);
+});
+
+// k31: the owner's row order.
+test('order: new live rows first, then the stored order (ordered: true), ended last; ended ids drop out; a slow Orca keeps orca ids', () => {
+  const { home, proj } = fixtureHome();
+  const opts = { now: NOW, run: fakeOrca(proj), alive: () => true };
+  assert.deepEqual(listAgents(home, opts).map((a) => [a.id, a.ordered]), [['s1', undefined], ['orca:term_B', undefined]]);
+  setOrder(home, ['orca:term_B', 's1', 's1']);
+  assert.deepEqual(readOrder(home), ['orca:term_B', 's1']);
+  assert.deepEqual(listAgents(home, opts).map((a) => [a.id, a.ordered]), [['orca:term_B', true], ['s1', true]]);
+  // only one id ordered: the new live row stays on top, the ordered one follows
+  setOrder(home, ['orca:term_B']);
+  assert.deepEqual(listAgents(home, opts).map((a) => [a.id, a.ordered ?? false]), [['s1', false], ['orca:term_B', true]]);
+  // without Orca's answer the orca id is not listed but stays stored
+  listAgents(home, { now: NOW, alive: () => true });
+  assert.deepEqual(readOrder(home), ['orca:term_B']);
+  // an ended id (s0) and a vanished session id leave the stored order; ended rows are never shown as ordered
+  setOrder(home, ['s0', 'gone-session', 's1']);
+  const all = listAgents(home, { now: NOW, alive: () => true, all: true });
+  assert.deepEqual(all.map((a) => [a.id, a.ordered ?? false]), [['s1', true], ['s0', false]]);
+  assert.deepEqual(readOrder(home), ['s1']);
+  // an unchanged order is not rewritten
+  const file = join(home, 'order.json');
+  utimesSync(file, new Date(NOW - 60 * MIN), new Date(NOW - 60 * MIN));
+  listAgents(home, opts);
+  assert.equal(Math.round(statSync(file).mtimeMs), NOW - 60 * MIN);
+});
+
+test('applyOrder: an orca id missing while Orca answered is gone', () => {
+  const rows = [{ id: 'a', status: 'idle' }, { id: 'b', status: 'working' }];
+  const r = applyOrder(rows, ['orca:x', 'b'], { present: new Set(['a', 'b']), orcaRead: true });
+  assert.deepEqual([r.list.map((a) => a.id), r.gone], [['a', 'b'], ['orca:x']]);
+  assert.deepEqual(applyOrder(rows, ['orca:x'], { present: new Set(['a', 'b']) }).gone, []);
+});
+
+// k35: progress from the transcript: `kadans progress` Bash calls, TodoWrite, task tools; main chain and sub-agents.
+const tool = (id, name, input) => ({ type: 'assistant', requestId: `r-${id}`, message: { id, model: 'claude-opus-5', role: 'assistant',
+  content: [{ type: 'text', text: 'step' }, { type: 'tool_use', id: `tu-${id}`, name, input }], usage: U(1, 1, 0, 0) } });
+const bash = (id, command) => tool(id, 'Bash', { command, description: 'progress' });
+
+test('scanTranscript (k35): newest progress of the main chain; sidechain lines ignored; a new prompt clears it', () => {
+  const f = join(tmp(), 'p.jsonl');
+  writeFileSync(f, jsonl([user('Do the five things'), bash('p1', 'kadans progress 1/5 "Reading the code"'),
+    bash('p2', 'npm test && kadans progress 2/5 "Writing tests"'), side(bash('p3', 'kadans progress 9/9 "Sub work"'))]));
+  let st = scanTranscript(f, null);
+  assert.deepEqual(st.progress, { done: 2, total: 5, step: 'Writing tests' });
+  appendFileSync(f, jsonl([tool('p4', 'TodoWrite', { todos: [{ content: 'A', status: 'completed', activeForm: 'Doing A' },
+    { content: 'B', status: 'in_progress', activeForm: 'Doing B' }, { content: 'C', status: 'pending', activeForm: 'Doing C' }] })]));
+  st = scanTranscript(f, st);
+  assert.deepEqual(st.progress, { done: 1, total: 3, step: 'Doing B' }, 'the newest call wins, whatever its kind');
+  appendFileSync(f, jsonl([bash('p5', 'grep -rn "kadans progress 4/4" lib')]));
+  st = scanTranscript(f, st);
+  assert.deepEqual(st.progress, { done: 1, total: 3, step: 'Doing B' }, 'a command that only mentions it does not count');
+  appendFileSync(f, jsonl([user('Now something else')]));
+  st = scanTranscript(f, st);
+  assert.equal(st.progress, null);
+  // a state cached before k35 (no progress field) picks it up from the next new lines, without a rescan
+  const old = { ...st };
+  delete old.progress;
+  delete old.tasks;
+  appendFileSync(f, jsonl([bash('p6', "kadans progress 3/4 'Last bits'")]));
+  assert.deepEqual(scanTranscript(f, old).progress, { done: 3, total: 4, step: 'Last bits' });
+});
+
+test('scanTranscript (k35): TaskCreate / TaskUpdate inputs count as progress', () => {
+  const f = join(tmp(), 't.jsonl');
+  writeFileSync(f, jsonl([user('Plan it'), tool('t1', 'TaskCreate', { subject: 'Parse', activeForm: 'Parsing' }),
+    tool('t2', 'TaskCreate', { subject: 'Render' }), tool('t3', 'TaskCreate', { subject: 'Ship' }),
+    tool('t4', 'TaskUpdate', { taskId: '1', status: 'completed' }), tool('t5', 'TaskUpdate', { taskId: '2', status: 'in_progress' }),
+    tool('t6', 'TaskUpdate', { taskId: '3', status: 'deleted' })]));
+  assert.deepEqual(scanTranscript(f, null).progress, { done: 1, total: 2, step: 'Render' });
+});
+
+test('listAgents (k35): the row and its sub-agent carry their progress', () => {
+  const { home, t } = fixtureHome();
+  appendFileSync(t, jsonl([bash('k1', 'kadans progress 2/3 "Wiring the panel"')]));
+  writeFileSync(join(dirname(t), 's1', 'subagents', 'agent-a1.jsonl'), jsonl([side(bash('x1', "node '/opt/kadans/bin/kadans.mjs' progress 1/4 'Reading docs'"))]));
+  const row = listAgents(home, { now: NOW, alive: () => true })[0];
+  assert.deepEqual(row.progress, { done: 2, total: 3, step: 'Wiring the panel' });
+  assert.deepEqual(row.subagents[0].progress, { done: 1, total: 4, step: 'Reading docs' });
 });

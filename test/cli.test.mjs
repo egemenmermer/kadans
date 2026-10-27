@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountKey } from '../lib/samples.mjs';
+import { appendEvent } from '../lib/agents.mjs';
 
 const BIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'kadans.mjs');
 
@@ -162,4 +163,22 @@ test('statusline gives up on a held store lock within 2 s: still prints the gaug
   assert.ok(ms < 3000, `statusline waited ${ms} ms on the lock`);
   assert.match(r.out, /^5h 40% /); // gauge from the samples already on disk
   assert.equal(readFileSync(file, 'utf8'), `${old}\n`); // the new sample was not written
+});
+
+test('agent order: stores listed ids (prefixes resolved), refuses unknown ids and empty calls', () => {
+  const sb = sandbox();
+  const now = Date.now();
+  for (const sid of ['sess-one', 'sess-two']) appendEvent(sb.home, { t: now - 1000, ev: 'UserPromptSubmit', sid, cwd: '/opt/p', transcript: null, prompt: 'go' }, now);
+  const file = join(sb.home, 'order.json');
+  assert.match(run(sb, ['agent', 'order']).err, /usage: kadans agent order/);
+  const bad = run(sb, ['agent', 'order', 'sess-two', 'nope-nope']);
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.err, /order not saved: no running agent with id nope-nope/);
+  assert.equal(existsSync(file), false);
+  const ok = run(sb, ['agent', 'order', 'sess-t', 'sess-one']);
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /order saved: 2 agents first/);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { ids: ['sess-two', 'sess-one'] });
+  const list = JSON.parse(run(sb, ['agents', '--json']).out);
+  assert.deepEqual(list.map((a) => [a.id, a.ordered]), [['sess-two', true], ['sess-one', true]]);
 });

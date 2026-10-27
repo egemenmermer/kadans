@@ -5,3 +5,7 @@
     agents: KF.base(),
   };
 })(window);
+// k32: the rename field, for snapshots: a double-click on the first title (Mac). Null-safe in the test DOM.
+window.KADANS_FIXTURES.brake_rename = Object.assign({}, window.KADANS_FIXTURES.brake, {
+  after: (doc) => doc.querySelector('[data-key="row:fx-0001"] .nm')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })),
+});

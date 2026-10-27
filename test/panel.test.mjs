@@ -11,12 +11,13 @@ const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'app', 'web')
 const read = (f) => readFileSync(join(WEB, f), 'utf8');
 
 // Tags and attributes the panel's own markup uses; anything else in the output came from data.
-const TAGS = new Set(['div', 'span', 'button', 'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'i', 'pre', 'p', 'input']);
+const TAGS = new Set(['div', 'span', 'button', 'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'i', 'pre', 'p', 'input', 'img']); // img: the pairing QR (k27)
 const ATTRS = new Set(['id', 'class', 'role', 'tabindex', 'title', 'style', 'data-key', 'data-do', 'data-id', 'data-task', 'data-k', 'data-v',
   'data-mode', 'data-until', 'data-num', 'data-set', 'data-unit', 'data-fmt', 'aria-label', 'aria-pressed', 'aria-checked',
   'aria-disabled', 'aria-expanded', 'aria-haspopup', 'aria-hidden', 'aria-valuemin', 'aria-valuemax', 'aria-valuenow',
   'aria-valuetext', 'width', 'height', 'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
-  'd', 'x', 'y', 'rx', 'ry', 'cx', 'cy', 'r', 'transform', 'type', 'min', 'max', 'step', 'value']);
+  'd', 'x', 'y', 'rx', 'ry', 'cx', 'cy', 'r', 'transform', 'type', 'min', 'max', 'step', 'value', 'src', 'alt',
+  'maxlength', 'placeholder', 'spellcheck', 'autocomplete', 'enterkeyhint']); // k32: the rename field
 
 // A small DOM for the keyed patch (k14): elements made from markup keep their inner markup as a string; shells built
 // by appending children serialise from their children. Every change is logged as [op, data-key or tag], so a test can
@@ -25,7 +26,7 @@ const UNESC = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': 
 const ESCA = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 class FNode {
   constructor(log, tag, attrs = [], inner = '', text = null) {
-    Object.assign(this, { log, tag, inner, text, kids: [], parentNode: null, listeners: {} });
+    Object.assign(this, { log, tag, inner, text, kids: [], parentNode: null, listeners: {}, style: {} });
     this.attrs = new Map(attrs);
   }
   static parse(log, html) {
@@ -101,7 +102,28 @@ class FNode {
   querySelector() { return null; }
   querySelectorAll() { return []; }
   getBoundingClientRect() { return { height: 0 }; }
-  closest() { return null; }
+  // k32: a stub layout for the drag tests: rows 44 px, sub-agent rows 32 px, stacked with no gaps; a list is 304 px wide.
+  get offsetHeight() { return / child /.test(` ${this.attrs.get('class') ?? ''} `) ? 32 : 44; }
+  get offsetTop() {
+    const p = this.parentNode;
+    if (!p) return 0;
+    let y = 0;
+    for (const k of p.kids) { if (k === this) break; if (k.tag !== '#text' && !(k.attrs.get('class') ?? '').includes('plate')) y += k.offsetHeight; }
+    return y;
+  }
+  setPointerCapture() {}
+  // simple selectors only: tag, .class, [attr] and [attr="v"], comma lists
+  matches(sel) {
+    return sel.split(',').some((one) => {
+      const m = /^([a-z]*)((?:\.[\w-]+)*)((?:\[[\w-]+(?:="[^"]*")?\])*)$/.exec(one.trim());
+      if (!m || this.tag === '#text') return false;
+      if (m[1] && m[1] !== this.tag) return false;
+      const cls = (this.attrs.get('class') ?? '').split(' ');
+      if (m[2] && !m[2].split('.').filter(Boolean).every((c) => cls.includes(c))) return false;
+      return [...m[3].matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)].every(([, a, v]) => this.attrs.has(a) && (v === undefined || this.attrs.get(a) === v));
+    });
+  }
+  closest(sel) { for (let x = this; x instanceof FNode; x = x.parentNode) if (x.matches(sel)) return x; return null; }
   animate() { return {}; }
 }
 
@@ -111,6 +133,7 @@ class FNode {
 function loadPanel(opts = {}) {
   const sent = [];
   const log = [];
+  const docListeners = {};
   const el = new FNode(log, 'div', [['id', 'kadans']]);
   const click = (e) => el.listeners.click[0](e);
   const noop = () => {};
@@ -122,22 +145,40 @@ function loadPanel(opts = {}) {
     getElementById: (id) => (id === 'kadans' ? el : null),
     createElement: (tag) => (tag === 'template'
       ? { content: null, set innerHTML(h) { this.content = { firstChild: FNode.parse(log, h) }; } } : el),
-    addEventListener: noop,
+    addEventListener: (t, fn) => { (docListeners[t] ??= []).push(fn); },
+    visibilityState: 'visible',
     querySelectorAll: () => [],
     // fixtures' `after` hooks click buttons: find the data-do / data-id in the selector and run the panel's click handler
     querySelector(sel) {
+      if (sel === 'link[rel="manifest"]') return manifestLink; // k29: the page points it at ?pair=<code> in iOS Safari
       const m = /data-do="([^"]+)"(?:\]\[data-id="([^"]+)")?/.exec(sel);
       if (!m) return null;
       const dataset = { do: m[1], ...(m[2] ? { id: m[2] } : {}) };
       return { click: () => click({ target: { closest: () => ({ dataset, getAttribute: () => null }) } }) };
     },
   };
+  // k29: panel.html's manifest link (null when opts.http.noManifest)
+  const manifestLink = opts.http?.noManifest ? null : { href: 'manifest.webmanifest', setAttribute(k, v) { if (k === 'href') this.href = v; } };
+  document.manifestLink = manifestLink;
   const timers = opts.timers;
   let tid = 0;
   const g = { document, console, setTimeout: timers ? (fn, ms) => { timers.push({ id: ++tid, fn, ms }); return tid; } : () => 0,
     clearTimeout: timers ? (id) => { const t = timers.find((x) => x.id === id); if (t) t.cleared = true; } : noop,
-    matchMedia: (q) => ({ matches: /reduce/.test(q) && opts.media?.reduce === true }), CSS: { escape: String },
+    matchMedia: (q) => ({ matches: (/reduce/.test(q) && opts.media?.reduce === true) || q === `(display-mode: ${opts.http?.displayMode ?? 'browser'})` }), CSS: { escape: String },
     webkit: { messageHandlers: { kadans: { postMessage: (m) => sent.push(m) } } } };
+  // k29 opts.http.standalone: navigator.standalone (iOS: false in Safari, true in a home-screen app; elsewhere unset);
+  // opts.http.displayMode: what (display-mode: …) matches ('browser' by default).
+  // k27 opts.http: { fetch, hash, store }: no bridge, a top-level http page (the phone), so panel.js starts its HTTP mode.
+  if (opts.http) {
+    delete g.webkit;
+    const store = opts.http.store ?? new Map();
+    Object.assign(g, { fetch: opts.http.fetch, navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
+      ...(Object.hasOwn(opts.http, 'standalone') ? { standalone: opts.http.standalone } : {}) },
+      localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
+      location: { protocol: 'http:', hash: opts.http.hash ?? '', pathname: '/', search: '' },
+      history: { replaceState: (a, b, url) => { g.location.hash = ''; (opts.http.replaced ??= []).push(url); } } });
+    g.top = g;
+  }
   if (opts.clock) g.Date = class extends Date { static now() { return opts.clock.now; } };
   g.window = g; // fixtures assign window.KF / window.KADANS_FIXTURES, which must be globals for the other scripts
   const ctx = vm.createContext(g);
@@ -147,7 +188,7 @@ function loadPanel(opts = {}) {
     .map((f) => read(join('fixtures', f))).join('\n;\n'), ctx);
   // a click on any element by its dataset (Settings segments carry data-k / data-v, which the fake querySelector does not parse)
   const tap = (dataset) => click({ target: { closest: () => ({ dataset, getAttribute: () => null }) } });
-  return { window, document, html: () => el.innerHTML, sent, tap, el, log };
+  return { window, document, html: () => el.innerHTML, sent, tap, el, log, docListeners };
 }
 
 // Fails on any tag or attribute the panel does not write itself (e.g. an injected <img onerror=...>).
@@ -297,6 +338,13 @@ test('panel: Close all confirms once, sends one stop per closable 2+ hour idle c
   assert.deepEqual(stops(), ['fx-0010', 'orca:term_fx11']);
 });
 
+// k32: a row's meta line as text (it is split into spans so a narrow row never cuts the context number).
+function pvText(row) {
+  const m = /<div class="pv[^"]*">(.*?)<\/div>/.exec(row);
+  assert.ok(m, 'the row has a meta line');
+  return m[1].replace(/<[^>]+>/g, '');
+}
+
 // ---------- k10b: compact hint and action ----------
 // One agent row's markup, from its opening tag up to the next row (or the end).
 function rowHtml(html, id) {
@@ -315,9 +363,10 @@ test('panel: context number and compact hint for none / soon / now / null', () =
   const html = p.html();
   // none (working): the number, no tag; the lifetime sum only in the tooltip
   const none = rowHtml(html, 'fx-0024');
-  assert.match(none, /Quarry · Opus · 148k context · 40 min/);
+  assert.equal(pvText(none), 'Quarry · Opus · 148k context · 40 min');
+  assert.match(none, /<span class="cx"> · 148k context<\/span>/); // its own span: never cut by the ellipsis
   assert.doesNotMatch(none, /class="tag"/);
-  assert.doesNotMatch(none, /class="pv">[^<]*2\.1M/);
+  assert.doesNotMatch(pvText(none), /2\.1M/);
   assert.match(none, /title="Port the CSV importer\n2\.1M tokens since start, cache reads not counted"/);
   // null: no number in that slot
   const nul = rowHtml(html, 'fx-0025');
@@ -329,7 +378,8 @@ test('panel: context number and compact hint for none / soon / now / null', () =
   assert.doesNotMatch(soon, /class="tag"/);
   // now: a quiet tag right after the number, the why as its title and in the row's aria text
   const now = rowHtml(html, 'fx-0021');
-  assert.match(now, /class="pv"><span class="tag" title="Idle 12 min: next turn re-reads all 152k">Compact\?<\/span> 152k context · Idle 12 min · Tidepool · Opus · 1 hr 35 min</);
+  assert.match(now, /class="pv meta"><span class="tg"><span class="tag" title="Idle 12 min: next turn re-reads all 152k">Compact\?<\/span> 152k context<\/span><span class="ld"> · Idle 12 min<\/span><span class="pj"> · Tidepool<\/span>/);
+  assert.equal(pvText(now), 'Compact? 152k context · Idle 12 min · Tidepool · Opus · 1 hr 35 min');
   assert.match(now, /aria-label="Refactor the sync worker\. Compact\? Idle 12 min: next turn re-reads all 152k\. 152k context\. Idle/);
   // now, but no Orca terminal: the tag tells the owner to type it
   assert.match(rowHtml(html, 'fx-0023'), /class="tag" title="Re-reads 128k tokens every turn\. Type \/compact in that chat">Compact\?/);
@@ -379,7 +429,7 @@ test('panel: Compact confirms first, then sends exactly one compact with the id 
   const row = rowHtml(p.html(), 'fx-0021');
   // the question and its reason on the line under the row; the row keeps its meta line, without the tag
   assert.match(row, /<div class="cwhy" data-key="why:fx-0021"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
-  assert.match(row, /class="pv">Idle 12 min · Tidepool · Opus · 152k context · 1 hr 35 min</);
+  assert.equal(pvText(row), 'Idle 12 min · Tidepool · Opus · 152k context · 1 hr 35 min');
   assert.match(row, /data-do="compact-go" data-id="fx-0021">Compact<\/button>/);
   assert.match(row, /data-do="cancel" data-id="fx-0021">Cancel/);
   assert.equal(compacts(p).length, 0);
@@ -419,7 +469,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
   p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
   let html = p.html();
-  assert.match(rowHtml(html, 'fx-0021'), /class="pv">Compacting… · Tidepool/);
+  assert.match(pvText(rowHtml(html, 'fx-0021')), /^Compacting… · Tidepool/);
   assert.doesNotMatch(rowHtml(html, 'fx-0021'), /class="tag"/);
   // no Compact anywhere while one is in flight, and a forged click is ignored
   assert.doesNotMatch(html, /data-do="compact"/);
@@ -582,13 +632,13 @@ test('panel: Compacted shows on the row once the context dropped after an accept
   p.document.querySelector('[data-do="compact"][data-id="fx-0021"]').click();
   p.document.querySelector('[data-do="compact-go"][data-id="fx-0021"]').click();
   p.window.kadans.result({ action: 'compact', id: 'fx-0021', ok: true, why: '' }); // the CLI typed it
-  assert.match(rowHtml(p.html(), 'fx-0021'), /Compacting… · Tidepool/);
+  assert.match(pvText(rowHtml(p.html(), 'fx-0021')), /Compacting… · Tidepool/);
   assert.doesNotMatch(p.html(), /Compacted/);
   clock.now += 20_000;
   const smaller = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, context: { tokens: 21000, window: 200000, pct: 10.5, advice: 'none', why: null } } : a));
   p.window.kadans.render({ agents: smaller });
   let row = rowHtml(p.html(), 'fx-0021');
-  assert.match(row, /class="pv">Compacted · Tidepool · Opus · 21k context/);
+  assert.match(pvText(row), /^Compacted · Tidepool · Opus · 21k context/);
   assert.doesNotMatch(row, /Compacting…|class="warn"/);
   clock.now += 8_100;
   p.window.kadans.render({});
@@ -1052,4 +1102,766 @@ test('opening or closing the popover drops focus, so no row comes back highlight
   p.window.document.activeElement = p.window.document.body;
   p.window.kadans.visible(true); // nothing focused: nothing to drop
   assert.equal(blurred, 2);
+});
+
+// ---------- k27: phone (HTTP transport, tap-to-show actions) and Settings › Phone ----------
+const flush = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
+// A fake server: records every call; `routes` answers by "METHOD path" with [status, body].
+function fakeServer(routes) {
+  const calls = [];
+  const fetch = (path, init = {}) => {
+    calls.push({ path, method: init.method, auth: init.headers?.Authorization ?? null, body: init.body ? JSON.parse(init.body) : null });
+    const r = routes[`${init.method} ${path}`];
+    if (!r) return Promise.reject(new Error('offline'));
+    const res = typeof r === 'function' ? r(init) : r;
+    if (!res) return Promise.reject(new Error('offline'));
+    const [status, body] = res;
+    return Promise.resolve({ status, json: async () => body });
+  };
+  return { calls, fetch, routes };
+}
+const fixture = (p, name) => { const f = { ...p.window.KADANS_FIXTURES[name] }; delete f.after; return JSON.parse(JSON.stringify(f)); };
+
+test('phone: pairs from #pair=, keeps the token, clears the hash, polls every 2 s while visible, sends actions over HTTP', async () => {
+  const timers = [];
+  const store = new Map();
+  let state = null;
+  const srv = fakeServer({
+    'POST api/pair': [200, { token: 'tok-1' }],
+    'GET api/state': () => [200, state],
+    'POST api/action': (init) => { const b = JSON.parse(init.body); return [200, { action: b.action, id: b.id ?? null, ok: false, why: 'Refused on the Mac' }]; },
+  });
+  const http = { fetch: srv.fetch, hash: '#pair=abcdefghijklmnop234567', store };
+  const p = loadPanel({ timers, http });
+  state = fixture(p, 'cruise');
+  await flush();
+  assert.equal(p.document.documentElement.dataset.shell, 'phone');
+  assert.deepEqual(srv.calls[0], { path: 'api/pair', method: 'POST', auth: null, body: { code: 'ABCDEFGHIJKLMNOP234567', name: 'iPhone' } });
+  assert.equal(p.window.location.hash, '', 'the one-time code leaves the address bar');
+  assert.equal(store.get('kadans.token'), 'tok-1');
+  assert.deepEqual({ path: srv.calls[1].path, method: srv.calls[1].method, auth: srv.calls[1].auth }, { path: 'api/state', method: 'GET', auth: 'Bearer tok-1' });
+  assert.equal(p.window.kadans.netState().state, 'live');
+  assert.ok(p.html().includes('Brake hooks for the Stop event'), 'the state renders');
+  const polls = () => timers.filter((t) => !t.cleared && t.ms >= 2000 && t.fn.name === 'poll');
+  assert.equal(polls().length, 1, 'one poll pending');
+  assert.equal(polls()[0].ms, 2000);
+  // the poll runs: one more GET, one more timer
+  const t = polls()[0];
+  t.cleared = true;
+  await t.fn();
+  await flush();
+  assert.equal(srv.calls.filter((c) => c.path === 'api/state').length, 2);
+  assert.equal(polls().length, 1);
+  // hidden: the poll stops; visible again: polls at once
+  p.document.visibilityState = 'hidden';
+  p.docListeners.visibilitychange.forEach((fn) => fn());
+  assert.equal(polls().length, 0);
+  p.document.visibilityState = 'visible';
+  p.docListeners.visibilitychange.forEach((fn) => fn());
+  await flush();
+  assert.equal(srv.calls.filter((c) => c.path === 'api/state').length, 3);
+  // actions: only the allow-listed ones go out (app-only ones are dropped), autopace becomes config-set, results show
+  const before = srv.calls.length;
+  for (const m of [{ action: 'size', height: 300 }, { action: 'open', id: 'fx-0002' }, { action: 'theme', theme: 'dark' }, { action: 'settings' }]) p.window.kadans.send(m);
+  await flush();
+  assert.equal(srv.calls.length, before, 'size / open / theme / settings never reach the server');
+  p.window.kadans.send({ action: 'autopace', on: false });
+  await flush();
+  assert.deepEqual(srv.calls.find((c) => c.path === 'api/action').body, { action: 'config-set', key: 'autopace', value: 'false' });
+  p.window.kadans.send({ action: 'stop', id: 'fx-0001' });
+  await flush();
+  const acts = srv.calls.filter((c) => c.path === 'api/action');
+  assert.deepEqual(acts.at(-1), { path: 'api/action', method: 'POST', auth: 'Bearer tok-1', body: { action: 'stop', id: 'fx-0001' } });
+  assert.ok(p.html().includes('Refused on the Mac'), 'the result reaches the row');
+  assert.equal(srv.calls.at(-1).path, 'api/state', 'an action is followed by a fresh read');
+});
+
+test('phone (k29): iOS Safari with #pair= holds the code for the home-screen app; no POST until "Use it in Safari instead"', async () => {
+  const CODE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const timers = [];
+  const store = new Map();
+  const srv = fakeServer({ 'POST api/pair': [200, { token: 'tok-s' }], 'GET api/state': () => [200, state] });
+  const http = { fetch: srv.fetch, hash: `#pair=${CODE.toLowerCase()}`, store, standalone: false, displayMode: 'browser' };
+  const p = loadPanel({ timers, http });
+  const state = fixture(p, 'cruise');
+  await flush();
+  assert.equal(srv.calls.length, 0, 'nothing sent: the code is for the home-screen app');
+  assert.equal(p.window.kadans.netState().state, 'install');
+  assert.equal(p.document.manifestLink.href, `manifest.webmanifest?pair=${CODE}`, 'the manifest starts the app at /#pair=<code>');
+  assert.equal(p.window.location.hash, `#pair=${CODE.toLowerCase()}`, 'the hash stays, in case iOS adds the page URL');
+  assert.equal(http.replaced, undefined);
+  const h = p.html();
+  assert.match(h, /Add Kadans to your Home Screen/);
+  assert.match(h, /Tap Share <svg class="share"[^]*<\/svg>, then Add to Home Screen\. Open it from there\./);
+  assert.match(h, /<button class="pill quiet" data-do="pair-here"[^>]*>Use it in Safari instead<\/button>/);
+  assert.ok(!h.includes(CODE) && !h.includes(CODE.toLowerCase()), 'the code is not in the page');
+  assert.ok(!h.includes('data-do="settings"'), 'the card replaces the panel');
+  assertNoInjection(h, 'install');
+  assert.equal(timers.filter((t) => !t.cleared && t.fn.name === 'poll').length, 0, 'no polling');
+  // a stored Safari token does not change that: a new code still goes to the home-screen app
+  const store2 = new Map([['kadans.token', 'old']]);
+  const srv2 = fakeServer({});
+  const p2 = loadPanel({ http: { fetch: srv2.fetch, hash: `#pair=${CODE}`, store: store2, standalone: false } });
+  await flush();
+  assert.equal(srv2.calls.length, 0);
+  assert.equal(p2.window.kadans.netState().state, 'install');
+  // coming back to the tab (or retry) does not poll with that token and does not replace the card
+  p2.docListeners.visibilitychange.forEach((f) => f());
+  p2.window.kadans.send({ action: 'retry' });
+  await flush();
+  assert.equal(srv2.calls.length, 0);
+  assert.equal(p2.window.kadans.netState().state, 'install');
+  srv2.routes['POST api/pair'] = [200, { token: 'new' }];
+  srv2.routes['GET api/state'] = [200, fixture(p2, 'cruise')];
+  p2.tap({ do: 'pair-here' });
+  await flush();
+  assert.equal(srv2.calls[0].path, 'api/pair');
+  assert.equal(srv2.calls[1].auth, 'Bearer new');
+  assert.equal(store2.get('kadans.token'), 'new');
+  // "Use it in Safari instead": pairs here as before, plain manifest back, hash cleared
+  p.tap({ do: 'pair-here' });
+  await flush();
+  assert.deepEqual(srv.calls[0], { path: 'api/pair', method: 'POST', auth: null, body: { code: CODE, name: 'iPhone' } });
+  assert.equal(store.get('kadans.token'), 'tok-s');
+  assert.equal(p.window.location.hash, '');
+  assert.equal(p.document.manifestLink.href, 'manifest.webmanifest');
+  assert.equal(p.window.kadans.netState().state, 'live');
+  assert.equal(srv.calls[1].auth, 'Bearer tok-s');
+  p.tap({ do: 'pair-here' });
+  await flush();
+  assert.equal(srv.calls.filter((c) => c.path === 'api/pair').length, 1, 'the button pairs once');
+  // no manifest link: still the screen, nothing thrown
+  const p3 = loadPanel({ http: { fetch: fakeServer({}).fetch, hash: `#pair=${CODE}`, standalone: false, noManifest: true } });
+  await flush();
+  assert.equal(p3.window.kadans.netState().state, 'install');
+});
+
+test('phone (k29): the home-screen app pairs from its start_url, clears the hash, and ignores the spent code on later launches', async () => {
+  const CODE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  for (const mode of [{ standalone: true, displayMode: 'standalone' }, { standalone: true, displayMode: 'browser' }, { displayMode: 'standalone' }]) {
+    const store = new Map();
+    let state = null;
+    const srv = fakeServer({ 'POST api/pair': [200, { token: 'tok-h' }], 'GET api/state': () => [200, state] });
+    const http = { fetch: srv.fetch, hash: `#pair=${CODE}`, store, ...mode };
+    const p = loadPanel({ http });
+    state = fixture(p, 'cruise');
+    await flush();
+    assert.deepEqual(srv.calls[0], { path: 'api/pair', method: 'POST', auth: null, body: { code: CODE, name: 'iPhone' } }, JSON.stringify(mode));
+    assert.equal(store.get('kadans.token'), 'tok-h');
+    assert.equal(p.window.location.hash, '');
+    assert.equal(p.document.manifestLink.href, 'manifest.webmanifest', 'the app leaves the manifest alone');
+    assert.equal(p.window.kadans.netState().state, 'live');
+    // a cold launch later: the same start_url, a token stored -> no pair call, a Bearer poll, the token kept
+    const srv2 = fakeServer({ 'POST api/pair': [401, { error: 'bad_code' }], 'GET api/state': () => [200, state] });
+    const p2 = loadPanel({ http: { ...http, fetch: srv2.fetch, hash: `#pair=${CODE}`, replaced: [] } });
+    await flush();
+    assert.equal(srv2.calls.filter((c) => c.path === 'api/pair').length, 0);
+    assert.equal(srv2.calls[0].auth, 'Bearer tok-h');
+    assert.equal(store.get('kadans.token'), 'tok-h');
+    assert.equal(p2.window.location.hash, '');
+    assert.equal(p2.window.kadans.netState().state, 'live');
+  }
+  // not iOS (navigator.standalone unset, e.g. Android): pairs at once in the browser, as before k29
+  const srv3 = fakeServer({ 'POST api/pair': [200, { token: 't3' }] });
+  loadPanel({ http: { fetch: srv3.fetch, hash: `#pair=${CODE}` } });
+  await flush();
+  assert.equal(srv3.calls[0].path, 'api/pair');
+});
+
+test('phone: a 401 drops the token and shows "Pair again"; no token and no code makes no request at all', async () => {
+  const timers = [];
+  const store = new Map([['kadans.token', 'old']]);
+  const srv = fakeServer({ 'GET api/state': [401, { error: 'unauthorized' }] });
+  const p = loadPanel({ timers, http: { fetch: srv.fetch, store } });
+  await flush();
+  assert.equal(srv.calls[0].auth, 'Bearer old');
+  assert.equal(store.has('kadans.token'), false);
+  assert.equal(p.window.kadans.netState().state, 'unpaired');
+  assert.match(p.html(), /Pair again/);
+  assert.match(p.html(), /Scan the code in Kadans on your Mac/);
+  assert.ok(!p.html().includes('data-do="settings"'), 'nothing else on the page while unpaired');
+  assert.equal(timers.filter((t) => !t.cleared && t.fn.name === 'poll').length, 0, 'no polling without a token');
+  // an action with no token goes nowhere
+  p.window.kadans.send({ action: 'stop', id: 'x' });
+  await flush();
+  assert.equal(srv.calls.length, 1);
+
+  const srv2 = fakeServer({});
+  const p2 = loadPanel({ http: { fetch: srv2.fetch } });
+  await flush();
+  assert.equal(srv2.calls.length, 0);
+  assert.match(p2.html(), /Pair this phone/);
+
+  // a used or expired code: 401 from /api/pair
+  const srv3 = fakeServer({ 'POST api/pair': [401, { error: 'bad code' }] });
+  const p3 = loadPanel({ http: { fetch: srv3.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  await flush();
+  assert.equal(srv3.calls.length, 1);
+  assert.match(p3.html(), /That code didn’t work/);
+  assert.match(p3.html(), /Pair again/);
+  // the Mac not answering: the last reading stays, with a quiet note
+  let up = true;
+  const srv4 = fakeServer({ 'POST api/pair': [200, { token: 't' }], 'GET api/state': () => (up ? [200, state4] : null) });
+  const t4 = [];
+  const p4 = loadPanel({ timers: t4, http: { fetch: srv4.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  const state4 = fixture(p4, 'cruise');
+  await flush();
+  up = false;
+  const t = t4.find((x) => !x.cleared && x.fn.name === 'poll');
+  t.cleared = true;
+  await t.fn();
+  await flush();
+  assert.match(p4.html(), /Can’t reach your Mac · trying again/);
+  assert.ok(p4.html().includes('Brake hooks for the Stop event'), 'the last reading stays');
+  assert.equal(t4.filter((x) => !x.cleared && x.fn.name === 'poll').at(-1).ms, 2000);
+  // 503: phone access was turned off on the Mac; the token stays, polling goes on more slowly
+  const off = fakeServer({ 'GET api/state': [503, { error: 'off' }] });
+  const t5 = [];
+  const store5 = new Map([['kadans.token', 'keep']]);
+  const p5 = loadPanel({ timers: t5, http: { fetch: off.fetch, store: store5 } });
+  await flush();
+  assert.match(p5.html(), /Phone access is off on your Mac/);
+  assert.equal(store5.get('kadans.token'), 'keep');
+  assert.equal(t5.filter((x) => !x.cleared && x.fn.name === 'poll').at(-1).ms, 4000);
+});
+
+test('phone: a tap on a row shows its actions, a second tap or a tap elsewhere hides them; no hover needed', async () => {
+  let state = null;
+  const srv = fakeServer({ 'POST api/pair': [200, { token: 't' }], 'GET api/state': () => [200, state] });
+  const p = loadPanel({ http: { fetch: srv.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  state = fixture(p, 'cruise');
+  await flush();
+  const click = p.el.listeners.click[0];
+  const rowTarget = (key) => ({ closest: (sel) => (sel.includes('.row') ? { getAttribute: () => key, classList: { contains: () => false } } : null) });
+  const btnIn = (key, dataset) => ({ closest: (sel) => (sel.includes('data-do') ? { dataset, getAttribute: () => null }
+    : sel.includes('.row') ? { getAttribute: () => key, classList: { contains: () => false } } : null) });
+  const hov = (key) => / hov\b/.test(p.el.find(key).getAttribute('class'));
+  assert.equal(hov('row:fx-0001'), false);
+  click({ target: rowTarget('row:fx-0001') });
+  assert.equal(hov('row:fx-0001'), true, 'tap shows the actions');
+  assert.equal(p.window.kadans.netState().tapKey, 'row:fx-0001');
+  click({ target: btnIn('row:fx-0001', { do: 'pace', id: 'fx-0001' }) });
+  assert.equal(hov('row:fx-0001'), true, 'a button inside the open row keeps it open');
+  click({ target: rowTarget('row:fx-0002') });
+  assert.equal(hov('row:fx-0001') || p.window.kadans.netState().tapKey !== 'row:fx-0002', false, 'one open row at a time');
+  click({ target: rowTarget('row:fx-0002') });
+  assert.equal(p.window.kadans.netState().tapKey, null, 'a second tap hides them');
+  click({ target: rowTarget('row:fx-0001') });
+  click({ target: { closest: () => null } });
+  assert.equal(p.window.kadans.netState().tapKey, null, 'a tap on empty space hides them');
+  assert.equal(hov('row:fx-0001'), false);
+  // the open row survives a refresh, and goes when its agent does
+  click({ target: rowTarget('row:fx-0001') });
+  p.window.kadans.render(fixture(p, 'cruise'));
+  assert.equal(hov('row:fx-0001'), true);
+  p.window.kadans.render({ agents: [] });
+  assert.equal(p.window.kadans.netState().tapKey, null);
+  // the Mac (pointer with hover) is unchanged: a click on a row opens nothing
+  const m = loadPanel();
+  m.window.kadans.render(m.window.KADANS_FIXTURES.cruise);
+  m.el.listeners.click[0]({ target: rowTarget('row:fx-0001') });
+  assert.equal(/ hov\b/.test(m.el.find('row:fx-0001').getAttribute('class')), false);
+});
+
+test('Settings › Phone: off, on with devices, pairing with QR and countdown, expired, error; sends phone-* actions', () => {
+  const clock = { now: 1792964040000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers });
+  const F = p.window.KADANS_FIXTURES;
+  const open = (name) => {
+    p.window.kadans.reset();
+    const f = F[name];
+    p.window.kadans.render(f);
+    f.after(p.document);
+    return p.html();
+  };
+  // no phone payload (older app): no section
+  assert.ok(!open('settings').includes('Use Kadans on your phone'));
+  // off
+  let h = open('settings_phone_off');
+  assert.match(h, /<div class="gl">Phone<\/div>/);
+  assert.match(h, /Use Kadans on your phone/);
+  assert.match(h, /On your Wi-Fi the link is not encrypted; turn on Tailscale to use it away from home or on shared Wi-Fi/);
+  assert.equal(p.el.find('set:phone').getAttribute('aria-checked'), 'false');
+  assert.ok(!h.includes('Pair a phone') && !h.includes('Revoke'));
+  p.tap({ do: 'phone-on' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'phone-on' });
+  assert.equal(p.el.find('set:phone').getAttribute('aria-checked'), 'true', 'the switch flips at once');
+  // on, with devices
+  h = open('settings_phone_on');
+  assert.equal(p.el.find('set:phone').getAttribute('aria-checked'), 'true');
+  assert.match(h, /data-do="phone-pair"[^>]*>Show code</);
+  assert.match(h, /<div>iPhone<\/div><div class="d">Used 3 min ago<\/div>/);
+  assert.match(h, /<div>iPad<\/div><div class="d">Not used yet<\/div>/);
+  p.tap({ do: 'phone-pair' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'phone-pair' });
+  p.tap({ do: 'phone-revoke', id: 'd1' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'phone-revoke', id: 'd1' });
+  p.tap({ do: 'phone-off' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'phone-off' });
+  // pairing: the QR, the line, the countdown; one 1 s timer patches the countdown alone
+  h = open('settings_phone_pairing');
+  assert.match(h, /<img class="qr" src="data:image\/png;base64,[A-Za-z0-9+/=]+" alt="Pairing code for your phone"/);
+  assert.match(h, /Scan with your phone’s camera, then Add to Home Screen/);
+  assert.match(h, /Works once · 9:41 left/);
+  assert.ok(!h.includes('Pair a phone'));
+  const tick = timers.filter((t) => !t.cleared && t.ms <= 1000).at(-1);
+  assert.ok(tick, 'a countdown timer runs');
+  clock.now += 1000;
+  p.log.length = 0;
+  tick.fn();
+  assert.match(p.html(), /9:40 left/);
+  assert.deepEqual(p.log, [['replace', 'div']], 'one node changes: the countdown line (the QR image stays)');
+  // expired
+  h = open('settings_phone_expired');
+  assert.match(h, /This code has expired/);
+  assert.match(h, /data-do="phone-pair"[^>]*>New code</);
+  assert.ok(!h.includes('<img'));
+  // error: a fixed line, never the app's text
+  h = open('settings_phone_error');
+  assert.match(h, /Couldn’t start the phone link\. Turn it off and on to try again\./);
+  assert.ok(!h.includes('EADDRINUSE') && !h.includes('192.0.2.10'));
+  // a QR that is not a PNG data URL is never drawn; a hostile device name is text
+  p.window.kadans.render({ phone: { on: true, pair: { qr: 'javascript:alert(1)" onerror="x', expiresAt: clock.now + 60000 }, devices: [{ id: 'z"><b>', name: '<img src=x onerror=alert(1)>' }] } });
+  h = p.html();
+  assert.ok(!h.includes('<img'));
+  assertNoInjection(h.replace(/<img class="qr"[^>]*>/g, ''), 'phone');
+  assert.ok(h.includes('&lt;img src=x onerror=alert(1)&gt;'));
+  // leaving Settings tells the app (it stops polling devices)
+  p.tap({ do: 'back' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'settings-closed' });
+});
+
+test('phone: Settings on the phone has no Phone or Claude Code group (Mac-only), and leaving it sends nothing to the app', async () => {
+  let state = null;
+  const srv = fakeServer({ 'POST api/pair': [200, { token: 't' }], 'GET api/state': () => [200, state] });
+  const p = loadPanel({ http: { fetch: srv.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  state = { ...fixture(p, 'settings'), phone: { on: true, devices: [] } };
+  await flush();
+  p.tap({ do: 'settings' });
+  const h = p.html();
+  assert.match(h, /Auto-pace/);
+  assert.ok(!h.includes('Use Kadans on your phone'));
+  assert.ok(!h.includes('Remove from Claude Code'));
+  const n = srv.calls.length;
+  p.tap({ do: 'back' });
+  await flush();
+  assert.ok(srv.calls.slice(n).every((c) => c.path === 'api/state'));
+  // revoked while Settings is open: back to the main screen with "Pair again"
+  p.tap({ do: 'settings' });
+  state = null;
+  srv.routes['GET api/state'] = [401, { error: 'unauthorized' }];
+  p.docListeners.visibilitychange.forEach((fn) => fn());
+  await flush();
+  assert.match(p.html(), /Pair again/);
+  assert.ok(!p.html().includes('Kadans settings'));
+});
+
+// ---------- k32: sub-agent numbers, rename, arrange ----------
+function arrangePanel(opts = {}) {
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const p = loadPanel({ clock, timers, ...opts });
+  const KF = p.window.KF;
+  const data = () => JSON.parse(JSON.stringify({ status: KF.status(), agents: KF.base() }));
+  p.window.kadans.reset();
+  p.window.kadans.render(data());
+  clock.now += 1000; // past the first-paint quiet time, so motion is on
+  timers.length = 0;
+  p.log.length = 0;
+  const list = p.el.find('row:fx-0001').parentNode;
+  list.getBoundingClientRect = () => ({ left: 0, right: 304, top: 0, bottom: 164, height: 164 });
+  const down = (id, y, more = {}) => p.el.listeners.pointerdown.forEach((fn) => fn({ target: p.el.find(`row:${id}`), pointerId: 1, pointerType: 'mouse',
+    button: 0, clientX: 100, clientY: y, ...more }));
+  const doc = (type, e) => p.docListeners[type].forEach((fn) => fn({ pointerId: 1, clientX: 100, preventDefault() {}, type, ...e }));
+  const hold = () => { const t = timers.find((x) => x.ms === 250 && !x.cleared && !x.ran); t.ran = true; t.fn(); };
+  const order = () => list.kids.map((k) => k.attrs.get('data-key'));
+  const reorders = () => JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'reorder'))); // out of the vm's realm
+  const key = (e) => p.docListeners.keydown.forEach((fn) => fn({ preventDefault() {}, ...e }));
+  // the drop's settle (spring) timer
+  const settle = () => timers.filter((x) => !x.cleared && !x.ran && x.ms >= 200 && x.ms < 1000).forEach((x) => { x.ran = true; x.fn(); });
+  return { p, clock, timers, data, list, down, doc, hold, order, reorders, key, settle };
+}
+
+test('k32: a sub-agent row shows what it spends (context, else tokens) with both in its tooltip; the parent adds the sum', () => {
+  const { p, data } = arrangePanel();
+  let html = p.html();
+  assert.match(html, /<span class="sn">· 45k<\/span>/);
+  assert.match(html, /data-key="sub:fx-sub-1" title="Reading the hooks docs\n45k context · 120k tokens since start" aria-label="Subagent: Reading the hooks docs\. 45k context · 120k tokens since start"/);
+  assert.match(html, /title="Brake hooks for the Stop event\n182k tokens since start, cache reads not counted\nsub-agents: 300k"/);
+  const d = data();
+  Object.assign(d.agents[0].subagents[0], { context: null, tokens: 120000 });
+  delete d.agents[0].subagentTokens;
+  p.window.kadans.render(d);
+  html = p.html();
+  assert.match(html, /<span class="sn">· 120k<\/span>/);
+  assert.match(html, /title="Reading the hooks docs\n120k tokens since start"/);
+  assert.doesNotMatch(html, /sub-agents:/);
+  Object.assign(d.agents[0].subagents[0], { context: null, tokens: null });
+  p.window.kadans.render(d);
+  assert.doesNotMatch(p.html(), /class="sn"/);
+  assert.match(p.html(), /data-key="sub:fx-sub-1" title="Reading the hooks docs" aria-label="Subagent: Reading the hooks docs"/);
+});
+
+test('k32: drag reorder: hold, move up past two rows, drop; the block lands first and one reorder carries the new ids', () => {
+  const { p, timers, down, doc, hold, order, reorders, list } = arrangePanel();
+  assert.deepEqual(order(), ['row:fx-0001', 'sub:fx-sub-1', 'row:fx-0002', 'row:fx-0003']);
+  down('fx-0003', 140);
+  assert.equal(p.window.kadans.arrangeState().phase, 'hold');
+  hold();
+  assert.equal(p.window.kadans.arrangeState().phase, 'on');
+  const row = p.el.find('row:fx-0003');
+  assert.match(row.getAttribute('class'), /\bcarried\b.*\blift\b|\blift\b.*\bcarried\b/);
+  assert.match(list.getAttribute('class'), /\barranging\b/);
+  doc('pointermove', { clientY: 90 }); // 50 px up: past fx-0002's middle
+  assert.equal(p.window.kadans.arrangeState().to, 1);
+  assert.equal(p.el.find('row:fx-0002').style.translate, '0 44px'); // fx-0002 glides down by the held row's height
+  doc('pointermove', { clientY: 10 }); // further up, past fx-0001 and its sub-agent
+  assert.equal(p.window.kadans.arrangeState().to, 0);
+  assert.equal(p.el.find('row:fx-0001').style.translate, '0 44px');
+  assert.equal(p.el.find('sub:fx-sub-1').style.translate, '0 44px'); // the sub-agent row moves with its parent
+  assert.ok(Number.parseFloat(row.style.translate.split(' ')[1]) < -120, 'the held row follows the pointer (rubber band past the top)');
+  assert.equal(reorders().length, 0, 'nothing is sent while the row is held');
+  doc('pointerup', {});
+  assert.deepEqual(reorders(), [{ action: 'reorder', ids: ['fx-0003', 'fx-0001', 'fx-0002'] }]);
+  assert.deepEqual(order().filter(Boolean), ['row:fx-0003', 'row:fx-0001', 'sub:fx-sub-1', 'row:fx-0002']);
+  assert.equal(p.el.find('row:fx-0003'), row, 'the same node, moved');
+  for (const k of ['row:fx-0001', 'sub:fx-sub-1', 'row:fx-0002', 'row:fx-0003']) assert.equal(p.el.find(k).style.translate, '');
+  assert.equal(p.window.kadans.arrangeState().phase, 'settle');
+  timers.filter((t) => !t.cleared && t.ms < 1000 && t.ms >= 200).forEach((t) => t.fn());
+  assert.equal(p.window.kadans.arrangeState().phase, null);
+  assert.doesNotMatch(row.getAttribute('class'), /carried|lift/);
+  assert.ok(!list.kids.some((k) => /plate/.test(k.attrs.get('class') ?? '')), 'the plate is gone');
+  // the click that ends a drag does nothing
+  p.el.listeners.click[0]({ target: row });
+  assert.equal(p.sent.filter((m) => m.action !== 'reorder' && m.action !== 'size').length, 0);
+});
+
+test('k32: the order holds until the served order agrees (or 10 s pass), then the data decides', () => {
+  const { p, clock, data, down, doc, hold, order, settle } = arrangePanel();
+  down('fx-0001', 20);
+  hold();
+  doc('pointermove', { clientY: 170 }); // down past both others (rubber band past the end)
+  doc('pointerup', {});
+  const want = ['row:fx-0002', 'row:fx-0003', 'row:fx-0001', 'sub:fx-sub-1'];
+  assert.deepEqual(order().filter(Boolean).slice(0, 4), want);
+  p.window.kadans.render(data()); // still the old served order, while the drop settles: kept for later
+  settle();
+  clock.now += 1000;
+  p.window.kadans.render(data());
+  assert.deepEqual(order().slice(0, 4), want, 'a refresh before the CLI stored it does not snap the row back');
+  const d = data();
+  d.agents = [d.agents[1], d.agents[2], d.agents[0]];
+  p.window.kadans.render(d);
+  assert.equal(p.window.kadans.arrangeState().order, null, 'served order agrees: local order dropped');
+  assert.deepEqual(order().slice(0, 4), want);
+  // a refused reorder puts the served order back at once
+  down('fx-0003', 76 + 22);
+  hold();
+  doc('pointermove', { clientY: 10 });
+  doc('pointerup', {});
+  settle();
+  assert.equal(order()[0], 'row:fx-0003');
+  p.window.kadans.result({ action: 'reorder', ok: false, why: 'Unknown command' });
+  assert.equal(p.window.kadans.arrangeState().order, null);
+  assert.equal(order()[0], 'row:fx-0002');
+  // no answer and no new order from the CLI (an older one): after 10 s the served order is back
+  down('fx-0003', 76 + 22);
+  hold();
+  doc('pointermove', { clientY: 10 });
+  doc('pointerup', {});
+  settle();
+  p.window.kadans.render(d);
+  assert.equal(order()[0], 'row:fx-0003');
+  clock.now += 10_500;
+  p.window.kadans.render(d);
+  assert.equal(order()[0], 'row:fx-0002');
+});
+
+test('k32: Escape or a drop outside the list cancels: no reorder, the order and the inline moves are undone', () => {
+  const { p, down, doc, hold, order, reorders, key } = arrangePanel();
+  const before = order();
+  down('fx-0002', 98);
+  hold();
+  doc('pointermove', { clientY: 10 });
+  assert.equal(p.window.kadans.arrangeState().to, 0);
+  key({ key: 'Escape' });
+  assert.equal(reorders().length, 0);
+  assert.ok(!p.sent.some((m) => m.action === 'close'), 'Escape cancels the drag, it does not close the popover');
+  assert.deepEqual(order().filter(Boolean), before);
+  for (const k of before) assert.equal(p.el.find(k).style.translate, '');
+  // a press while the last drop settles is ignored
+  down('fx-0003', 142);
+  const t = p.window.kadans.arrangeState();
+  assert.equal(t.phase, 'settle', 'a new press waits for the last drop to settle');
+});
+
+test('k32: a drop well outside the list glides back and sends nothing; a press that moves first is not a hold', () => {
+  const { p, down, doc, hold, order, reorders, timers } = arrangePanel();
+  const before = order();
+  down('fx-0002', 98);
+  hold();
+  doc('pointermove', { clientY: 10 });
+  doc('pointermove', { clientY: 10, clientX: 420 }); // off the panel to the right
+  assert.equal(p.window.kadans.arrangeState().out, true);
+  assert.equal(p.window.kadans.arrangeState().to, 1, 'outside: the target is the row\'s own place');
+  assert.equal(p.el.find('row:fx-0001').style.translate, '');
+  doc('pointerup', { clientX: 420 });
+  assert.equal(reorders().length, 0);
+  assert.deepEqual(order().filter(Boolean), before);
+  timers.filter((x) => !x.cleared && x.ms >= 200 && x.ms < 1000).forEach((x) => x.fn());
+  // a press that wanders more than a few px before the hold is a scroll or a click: no drag
+  down('fx-0002', 98);
+  doc('pointermove', { clientY: 110 });
+  assert.equal(p.window.kadans.arrangeState().phase, null);
+  // buttons, ended rows, sub-agent rows and the idle group never start a hold
+  p.el.listeners.pointerdown.forEach((fn) => fn({ target: p.el.find('sub:fx-sub-1'), pointerId: 1, button: 0, clientX: 0, clientY: 50 }));
+  assert.equal(p.window.kadans.arrangeState().phase, null);
+});
+
+test('k32: a hold pending when the popover closes never lifts, so later refreshes are still drawn', () => {
+  const { p, data, down, timers } = arrangePanel();
+  down('fx-0003', 140);
+  p.window.kadans.visible(false);
+  const t = timers.find((x) => x.ms === 250);
+  assert.equal(t.cleared, true);
+  t.fn(); // even if the timer still ran
+  assert.equal(p.window.kadans.arrangeState().phase, null);
+  p.window.kadans.visible(true);
+  const d = data();
+  d.agents.unshift(p.window.KF.agent('fx-0031', { title: 'Another one', startedAt: p.window.KF.N - 60000 }));
+  p.window.kadans.render(d);
+  assert.ok(p.el.find('row:fx-0031'));
+});
+
+test('k32: a refresh during a drag never yanks the held row; it is drawn on drop', () => {
+  const { p, data, down, doc, hold, list, reorders } = arrangePanel();
+  down('fx-0003', 140);
+  hold();
+  doc('pointermove', { clientY: 100 });
+  const row = p.el.find('row:fx-0003');
+  const t = row.style.translate;
+  p.log.length = 0;
+  const d = data();
+  d.agents.unshift(p.window.KF.agent('fx-0030', { title: 'A new one', startedAt: p.window.KF.N - 60000 }));
+  d.agents[3].project = 'Moved on';
+  p.window.kadans.render(d);
+  assert.deepEqual(p.log, [], 'nothing on screen changed');
+  assert.equal(p.el.find('row:fx-0030'), null);
+  assert.equal(row.style.translate, t);
+  doc('pointermove', { clientY: 96 });
+  doc('pointerup', {});
+  assert.deepEqual(reorders()[0].ids, ['fx-0001', 'fx-0003', 'fx-0002']); // the rows as they were when lifted
+  assert.ok(p.el.find('row:fx-0030'), 'the kept data is drawn after the drop');
+  assert.ok(list.kids.indexOf(p.el.find('row:fx-0003')) < list.kids.indexOf(p.el.find('row:fx-0002')));
+});
+
+test('k32: Alt+Down / Alt+Up on a focused row moves it one place at once and sends the new order', () => {
+  const { p, key, order, reorders } = arrangePanel();
+  p.document.activeElement = p.el.find('row:fx-0001');
+  let prevented = 0;
+  key({ key: 'ArrowDown', altKey: true, preventDefault() { prevented += 1; } });
+  assert.equal(prevented, 1);
+  assert.deepEqual(reorders(), [{ action: 'reorder', ids: ['fx-0002', 'fx-0001', 'fx-0003'] }]);
+  assert.deepEqual(order(), ['row:fx-0002', 'row:fx-0001', 'sub:fx-sub-1', 'row:fx-0003']);
+  assert.ok(!p.log.some(([op, k]) => op === 'class' && /row/.test(k) && false));
+  p.document.activeElement = p.el.find('row:fx-0002');
+  key({ key: 'ArrowUp', altKey: true }); // already first: nothing to send
+  assert.equal(reorders().length, 1);
+  p.document.activeElement = p.el.find('row:fx-0003');
+  key({ key: 'ArrowUp', altKey: true });
+  assert.deepEqual(reorders()[1].ids, ['fx-0002', 'fx-0003', 'fx-0001']);
+  // a sub-agent row is not moved, and plain arrows do nothing
+  p.document.activeElement = p.el.find('sub:fx-sub-1');
+  key({ key: 'ArrowDown', altKey: true });
+  p.document.activeElement = p.el.find('row:fx-0002');
+  key({ key: 'ArrowDown' });
+  assert.equal(reorders().length, 2);
+});
+
+test('k32: rename: double-click the title, Enter saves (trimmed, 80 max), Escape cancels, empty clears; a refresh keeps the field', () => {
+  const { p, clock, data, key } = arrangePanel();
+  const dbl = (id) => p.el.listeners.dblclick.forEach((fn) => fn({ target: p.el.find(`row:${id}`).kids[1].kids[0] }));
+  const renames = () => JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'rename')));
+  dbl('fx-0001');
+  assert.match(p.html(), /<input class="rn" type="text" data-key="rn:fx-0001" value="Brake hooks for the Stop event" maxlength="80" placeholder="Automatic title"/);
+  assert.match(p.el.find('row:fx-0001').getAttribute('class'), /\brenaming\b/);
+  const inp = p.el.find('rn:fx-0001');
+  inp.value = '  Ship the brake  ';
+  clock.now += 60_000;
+  const d = data();
+  d.status.now += 60_000; // the minute tick changes the meta line
+  p.window.kadans.render(d);
+  assert.equal(p.el.find('rn:fx-0001'), inp, 'the field keeps its node (and what was typed)');
+  key({ key: 'Enter', target: inp });
+  assert.deepEqual(renames(), [{ action: 'rename', id: 'fx-0001', title: 'Ship the brake' }]);
+  assert.match(p.html(), /<div class="nm">Ship the brake<\/div>/, 'the new name shows at once');
+  p.window.kadans.render(data()); // served title not updated yet: the new name stays
+  assert.match(p.html(), /<div class="nm">Ship the brake<\/div>/);
+  // Escape cancels and never closes the popover
+  dbl('fx-0002');
+  p.el.find('rn:fx-0002').value = 'Something else';
+  key({ key: 'Escape', target: p.el.find('rn:fx-0002') });
+  assert.equal(renames().length, 1);
+  assert.ok(!p.sent.some((m) => m.action === 'close'));
+  assert.doesNotMatch(p.html(), /class="rn"/);
+  // empty clears to the automatic title; long names are cut at 80, control characters dropped
+  dbl('fx-0003');
+  p.el.find('rn:fx-0003').value = `${'x'.repeat(100)}`;
+  key({ key: 'Enter', target: p.el.find('rn:fx-0003') });
+  assert.equal(renames()[1].title.length, 80);
+  const d2 = data();
+  d2.agents[0].title = 'Ship the brake';
+  p.window.kadans.render(d2);
+  dbl('fx-0001');
+  assert.match(p.html(), /value="Ship the brake"/);
+  p.el.find('rn:fx-0001').value = '   ';
+  key({ key: 'Enter', target: p.el.find('rn:fx-0001') });
+  assert.deepEqual(renames()[2], { action: 'rename', id: 'fx-0001', title: '' });
+  assert.match(p.html(), /<div class="nm">Write the brake hooks<\/div>/, 'cleared: the automatic title');
+  // leaving the field (or closing the popover) cancels
+  dbl('fx-0002');
+  p.el.find('rn:fx-0002').value = 'Half typed';
+  p.window.kadans.visible(false);
+  assert.equal(renames().length, 3);
+  assert.doesNotMatch(p.html(), /class="rn"/);
+});
+
+test('k32: on a phone, Rename is in the row\'s tap actions; rename and reorder go out over HTTP', async () => {
+  const { p } = arrangePanel();
+  p.window.matchMedia = (q) => ({ matches: q === '(hover: none)' });
+  p.window.kadans.render({});
+  assert.match(p.html(), /data-do="rename" data-id="fx-0001"/);
+  p.tap({ do: 'rename', id: 'fx-0001' });
+  assert.match(p.html(), /data-key="rn:fx-0001"/);
+  // the phone transport allows both new actions
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, body: init.body ? JSON.parse(init.body) : null });
+    return { status: 200, json: async () => (url.includes('state') ? { status: null, agents: [] } : { ok: true }) };
+  };
+  const ph = loadPanel({ http: { fetch, store: new Map([['kadans.token', 'tok']]) } });
+  await new Promise((r) => setImmediate(r));
+  ph.window.kadans.send({ action: 'rename', id: 'a1', title: 'New' });
+  ph.window.kadans.send({ action: 'reorder', ids: ['a2', 'a1'] });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'rename' && c.body.title === 'New'));
+  assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'reorder' && c.body.ids.length === 2));
+});
+
+test('Codex account: labelled "Codex", its 30-day window named, never the default pick', () => {
+  const p = loadPanel();
+  const d = { status: { accounts: [
+    { key: 'cx', kind: 'codex', name: 'Codex', own: false, acts: false, state: 'gas', limits: [{ name: 'window_43200', pct: 1, resetsAt: Date.now() + 86400000 }] },
+    { key: 'me', own: true, state: 'cruise', limits: [{ name: 'five_hour', pct: 20, resetsAt: Date.now() + 3600000 }] },
+  ] }, agents: [] };
+  p.window.kadans.render(d);
+  const html = p.html();
+  assert.match(html, />Codex</);
+  assert.match(html, /5-hour limit/); // the own account is shown first, not Codex
+});
+
+// k35: progress on agent rows and sub-agent rows.
+test('k35: progress leads the meta line ("3/5 · Writing tests") with a bar under the title; none without progress', () => {
+  const p = loadPanel();
+  p.window.kadans.render(fixture(p, 'progress'));
+  const html = p.html();
+  assert.match(html, /<span class="pn">3\/5<\/span><span class="ps"> · Writing tests<\/span><span class="pj"> · Tidepool<\/span>/);
+  assert.match(html, /<div class="pb" aria-hidden="true"><i style="transform:scaleX\(0\.6\)"><\/i><\/div>/);
+  assert.match(html, /aria-label="Brake hooks for the Stop event\. 3 of 5 done: Writing tests\. Tidepool/);
+  // needs-you keeps its words first; a step-less count; 0/6 still draws the (empty) bar on its track
+  assert.match(html, /<span class="ld"><span class="need">Needs you<\/span><\/span><span class="pn"> · 1\/3<\/span><span class="ps"> · Comparing/);
+  assert.match(html, /<span class="pn">0\/6<\/span><span class="pj"> · Marlin<\/span>/);
+  assert.match(html, /<i style="transform:scaleX\(0\)"><\/i>/);
+  // a row without progress: a hidden bar slot, no count
+  const fern = html.slice(html.indexOf('data-key="row:fx-0003"'), html.indexOf('data-key="row:fx-0004"'));
+  assert.match(fern, /<div class="pb off" aria-hidden="true">/);
+  assert.doesNotMatch(fern, /class="pn"/);
+  // the sub-agent row: count and step in small, the bar, all in its tooltip
+  assert.match(html, /<span class="sq">· 1\/4<\/span><span class="sp">· Hook input formats<\/span><span class="sn">· 45k<\/span><div class="pb" aria-hidden="true"><i style="transform:scaleX\(0\.25\)"><\/i><\/div>/);
+  assert.match(html, /title="Reading the hooks docs\n1\/4 · Hook input formats\n45k context · 120k tokens since start" aria-label="Subagent: Reading the hooks docs\. 1 of 4 done: Hook input formats\. 45k context/);
+});
+
+test('k35: a new value patches the bar in place (it glides); ended rows, bad values and hostile steps', () => {
+  const p = loadPanel();
+  const d = fixture(p, 'progress');
+  p.window.kadans.render(d);
+  const bar = p.el.find('row:fx-0001').kids[1].kids[1];
+  assert.equal(bar.getAttribute('class'), 'pb');
+  d.agents[0].progress = { done: 4, total: 5, step: 'Writing tests' };
+  p.window.kadans.render(d);
+  assert.equal(p.el.find('row:fx-0001').kids[1].kids[1], bar, 'same node');
+  assert.equal(bar.kids[0].getAttribute('style'), 'transform:scaleX(0.8)');
+  for (const bad of [{ done: 1, total: 0 }, { done: 'x', total: 3 }, null, { done: 2 }]) {
+    d.agents[0].progress = bad;
+    p.window.kadans.render(d);
+    assert.doesNotMatch(p.html().slice(0, p.html().indexOf('data-key="row:fx-0002"')), /class="pn"/, JSON.stringify(bad));
+  }
+  d.agents[0].progress = { done: 9, total: 3, step: '<img src=x onerror=alert(1)>' };
+  p.window.kadans.render(d);
+  assert.match(p.html(), /<span class="pn">3\/3<\/span><span class="ps"> · &lt;img src=x onerror=alert\(1\)&gt;<\/span>/);
+  assertNoInjection(p.html(), 'hostile step');
+  Object.assign(d.agents[0], { status: 'ended', progress: { done: 2, total: 5, step: 'Old' } });
+  p.window.kadans.render(d);
+  assert.doesNotMatch(p.html(), /Old/);
+});
+
+test('k35: the phone page shows the same progress', async () => {
+  let state = null;
+  const srv = fakeServer({ 'POST api/pair': [200, { token: 't' }], 'GET api/state': () => [200, state] });
+  const p = loadPanel({ http: { fetch: srv.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  state = fixture(p, 'progress');
+  await flush();
+  assert.equal(p.document.documentElement.dataset.shell, 'phone');
+  assert.match(p.html(), /<span class="pn">3\/5<\/span><span class="ps"> · Writing tests<\/span>/);
+  assert.match(p.html(), /<span class="sq">· 1\/4<\/span>/);
+});
+
+test('k38: other computers: a quiet header per machine after the local rows, no actions on their rows, offline hides rows', () => {
+  const p = loadPanel();
+  p.window.kadans.render(fixture(p, 'remote'));
+  const html = p.html();
+  const at = (s) => html.indexOf(s);
+  assert.ok(at('data-key="row:fx-0302"') < at('data-key="mh:other"'), 'local rows first');
+  assert.match(html, /<div class="mh" data-key="mh:other" title="Agents on other"><span class="mn">other<\/span> · <span class="mc">2<\/span><\/div>/);
+  assert.ok(at('data-key="mh:other"') < at('data-key="row:remote:other:tab-1:1"'));
+  assert.match(html, /<div class="mh off" data-key="mh:spare" title="spare is offline"><span class="mn">spare<\/span> · <span class="mc">offline<\/span><\/div>/);
+  assert.ok(!html.includes('data-key="row:remote:spare"'), 'an offline machine shows no rows');
+  // no stop, close, pace, replace, compact, open or rename on a remote row
+  const row = html.slice(at('data-key="row:remote:other:tab-2:1"'));
+  assert.match(row, /<div class="acts"><\/div>/);
+  assert.ok(!/data-id="remote:/.test(html), 'no action button carries a remote id');
+  // the Agents count and the reorder only know this computer's rows
+  assert.match(html, /<div class="sh"><span>Agents<\/span><span>2<\/span><\/div>/);
+  // a stale machine says so in its header
+  const d = fixture(p, 'remote');
+  for (const a of d.agents) if (a.machine === 'other') a.machineStale = true;
+  p.window.kadans.render(d);
+  assert.match(p.html(), /<span class="mc">2 · not live<\/span>/);
+});
+
+test('k38: no empty meta part: a blank or separator-only part is dropped, so "Idle 1 min" never ends in a stray dot', () => {
+  const p = loadPanel();
+  const d = fixture(p, 'remote');
+  d.agents = d.agents.filter((a) => a.id === 'fx-0302');
+  for (const project of ['   ', '·', ' . ', '…']) {
+    d.agents[0].project = project;
+    p.window.kadans.reset();
+    p.window.kadans.render(d);
+    const row = p.html().slice(p.html().indexOf('data-key="row:fx-0302"'));
+    const meta = /<div class="pv meta">(.*?)<\/div>/.exec(row)[1];
+    assert.equal(meta, '<span class="ld">Idle 1 min</span>', `project ${JSON.stringify(project)}`);
+  }
+  // and a squeezed part keeps room for " · X…" (CSS), never only its separator
+  assert.match(read('panel.css'), /\.pv\.meta > :is\(\.du, \.fm, \.pj, \.ps\) \{ min-width: 2\.6em; \}/);
+});
+
+test('k38: the phone page shows the other computers too, without actions', async () => {
+  let state = null;
+  const srv = fakeServer({ 'POST api/pair': [200, { token: 't' }], 'GET api/state': () => [200, state] });
+  const p = loadPanel({ http: { fetch: srv.fetch, hash: '#pair=ABCDEFGHJKLMNPQR' } });
+  state = fixture(p, 'remote');
+  await flush();
+  assert.match(p.html(), /data-key="mh:other"/);
+  assert.ok(!/data-id="remote:/.test(p.html()));
 });

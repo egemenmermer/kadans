@@ -4,6 +4,7 @@
 :root {
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   --panel: #ffffff;
+  --qr-bg: #ffffff; /* the pairing code stays black on white in both themes, so any camera reads it */
   --card: #f5f5f7;
   --hover: #f2f2f4;
   --sel: #ececef;
@@ -17,6 +18,7 @@
   --blue2: #2f6ff0;
   --blue-top: #4d8df8;
   --soft-blue: rgba(74,140,247,.28);
+  --prog: rgba(74,140,247,.6); /* k35: the progress bar's fill, a muted accent */
   --soft-orange: rgba(255,149,0,.45);
   --orange: #f59e0b;
   --orange-text: #b45309;
@@ -50,6 +52,8 @@
   --shadow-knob: 0 1px 2px rgba(0,0,0,.25);
   --shadow-blue: 0 1px 2px rgba(47,111,240,.35);
   --focus: 0 0 0 3px rgba(74,140,247,.45);
+  --lift-bg: #ffffff; /* k32: the plate under a row being moved */
+  --shadow-lift: 0 0 0 .5px rgba(0,0,0,.06), 0 8px 24px rgba(20,20,40,.14), 0 2px 6px rgba(20,20,40,.08);
 
   /* Motion (k9a): short, ease-out, transform and opacity only. */
   --ease-out: cubic-bezier(.2,.9,.25,1);
@@ -60,16 +64,18 @@
   :root:not([data-theme="light"]) {
     --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --sel: #323236; --line: rgba(255,255,255,.07);
     --label: #f2f2f4; --label2: #9a9aa0; --label3: #6a6a70; --track: #3a3a3f; --pill: #2e2e32;
-    --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80; --tag: rgba(74,140,247,.2); --tag-text: #93b8fb;
+    --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80; --tag: rgba(74,140,247,.2); --tag-text: #93b8fb; --prog: rgba(120,165,250,.6);
     --shadow-panel: 0 0 0 .5px rgba(255,255,255,.08), 0 12px 40px rgba(0,0,0,.5);
+    --lift-bg: #2e2e33; --shadow-lift: 0 0 0 .5px rgba(255,255,255,.09), 0 10px 28px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.3);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --panel: #1f1f22; --card: #2a2a2e; --hover: #2a2a2e; --sel: #323236; --line: rgba(255,255,255,.07);
   --label: #f2f2f4; --label2: #9a9aa0; --label3: #6a6a70; --track: #3a3a3f; --pill: #2e2e32;
-  --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80; --tag: rgba(74,140,247,.2); --tag-text: #93b8fb;
+  --orange-text: #fbbf24; --red-text: #f87171; --add-text: #4ade80; --tag: rgba(74,140,247,.2); --tag-text: #93b8fb; --prog: rgba(120,165,250,.6);
   --shadow-panel: 0 0 0 .5px rgba(255,255,255,.08), 0 12px 40px rgba(0,0,0,.5);
+  --lift-bg: #2e2e33; --shadow-lift: 0 0 0 .5px rgba(255,255,255,.09), 0 10px 28px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.3);
   color-scheme: dark;
 }
 /* End of theme block. */
@@ -112,6 +118,7 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .msg .t { font-weight: 500; }
 .msg .s { font-size: 12px; color: var(--label2); margin-top: 2px; }
 .msg .btns { display: flex; gap: 6px; margin-top: 9px; }
+.msg .s .share { display: inline-block; width: 1em; height: 1.2em; vertical-align: -0.25em; color: var(--label); } /* k29: the iOS Share glyph */
 .acct { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-full); background: var(--pill); margin: 0 0 8px; font-size: 12px; }
 .acct button { flex: 1; min-width: 0; padding: 3px 8px; border-radius: var(--r-full); color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct button[aria-pressed="true"] { background: var(--panel); color: var(--label); box-shadow: var(--shadow-seg); font-weight: 500; }
@@ -120,20 +127,61 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .sh { display: flex; align-items: center; justify-content: space-between; padding: 12px 8px 4px; font-size: 12px; color: var(--label2); }
 .list { position: relative; flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
 .list::-webkit-scrollbar { display: none; }
+/* k32: the list reaches into the panel's padding (its rows stay put), so a lifted row's scale and shadow are not cut. */
+.list { margin: 0 -8px; padding: 0 8px; }
 .list.scroll { -webkit-mask-image: linear-gradient(180deg, #000 85%, transparent); mask-image: linear-gradient(180deg, #000 85%, transparent); }
 .list.scroll.end { -webkit-mask-image: none; mask-image: none; }
 .row { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--r-row); min-height: 44px; }
 .row { transition: background-color .12s ease-out; }
+/* k32: rows can be held and moved, so a press never starts a text selection or the iOS callout. */
+.list .row:not(.grp) { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 /* k18: a row's hover, a changed meta line or a moving blob stays inside the row: no layout or paint work outside it.
    Not on the idle group row, whose toggle button fills it (its focus ring would be clipped). */
 .row:not(.grp) { contain: layout paint; }
-.row:hover, .row.hov, .row:focus-within { background: var(--hover); }
+.row.hov, .row:focus-within { background: var(--hover); }
+@media (hover: hover) { .row:hover { background: var(--hover); } }
 .av { width: 30px; height: 30px; flex: none; }
 .bw { display: flex; flex: none; transform-origin: 50% 90%; }
 .tx { min-width: 0; flex: 1; }
 .nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pv { font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .pv .need { color: var(--orange-text); font-weight: 500; }
+/* k32: the meta line in parts, each carrying its " · " (white-space: pre keeps it). The "Compact? 152k context" tag
+   and the context number never shrink. The other parts share what is left, each up to its own width, in this order of
+   need (flex-grow from a zero basis, steps of 100x): the state lead ("Needs you", "Idle 2 hr"), the age, the model,
+   then the project. So a narrow row loses the project first and never cuts the number ("430k co…"). */
+.pv.meta { display: flex; }
+.pv.meta > span { flex: none; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.pv.meta > :is(.ld, .du, .fm, .pj) { flex: 1 1 0; min-width: 0; max-width: max-content; }
+/* k38: a squeezed part never shows only its " · " or a lone "…" (the stray "Idle 1 min ." dot): it keeps room for the
+   separator, a letter and the ellipsis, and the line clips past that. */
+.pv.meta > :is(.du, .fm, .pj, .ps) { min-width: 2.6em; }
+.pv.meta > .ld { flex-grow: 1000000; }
+.pv.meta > .du { flex-grow: 10000; }
+.pv.meta > .fm { flex-grow: 100; }
+/* k35: "3/5 · Writing tests" right after the state words. The count never shrinks; the step gets room before the age,
+   model and project, so those are cut first. */
+.pv.meta > .pn { color: var(--label); }
+.pv.meta > .ps { flex: 1 1 0; min-width: 0; max-width: max-content; flex-grow: 100000; }
+/* k35: the progress bar under the title: a 2 px track with a fill scaled from the left, between the two lines
+   (3 px taller: a bar with no gap touched the title's descenders and the digits below); a hidden slot without progress */
+.pb { height: 2px; margin: 1px 0 0; position: relative; border-radius: 1px; background: var(--track); overflow: hidden; }
+.pb.off { display: none; }
+.pb > i { display: block; height: 100%; background: var(--prog); transform-origin: left center; transition: transform .45s cubic-bezier(.2,.8,.2,1); }
+.tx.sub { position: relative; }
+.tx.sub :is(.sq, .sp) { flex: none; font-size: 12px; color: var(--label2); font-variant-numeric: tabular-nums; }
+.tx.sub .sp { flex: 0 1000 auto; min-width: 0; font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.tx.sub .pb { position: absolute; left: 0; right: 0; bottom: -4px; height: 1.5px; margin: 0; }
+/* Sub-agent rows: the name ellipsises, its number ("· 45k") stays at the end. */
+.tx.sub { display: flex; align-items: baseline; gap: .3em; }
+.tx.sub .nm { min-width: 0; }
+.child .sn { flex: none; font-size: 12px; color: var(--label2); font-variant-numeric: tabular-nums; }
+/* Rename: the title becomes a field in place (same size and weight), the actions step aside. */
+.rn { display: block; font: inherit; font-weight: 500; color: var(--label); background: var(--panel); border: 0;
+  border-radius: 6px; height: 1.35em; padding: 0 6px; margin: 0 -6px; width: calc(100% + 12px); box-shadow: var(--focus); outline: none;
+  -webkit-user-select: text; user-select: text; }
+.rn::placeholder { color: var(--label3); font-weight: 400; }
+.row.renaming .acts { display: none; }
 .pv .urgent { color: var(--red-text); }
 .child { padding-left: 26px; min-height: 32px; }
 .child .av { width: 22px; height: 22px; }
@@ -145,11 +193,12 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .acts { position: absolute; top: 0; bottom: 0; right: 8px; display: flex; align-items: center; gap: 4px; padding-left: 22px;
   background: linear-gradient(90deg, transparent, var(--hover) 20px); opacity: 0; visibility: hidden;
   transition: opacity .15s ease-out, visibility 0s linear .15s; }
-.row:hover .acts, .row:focus-within .acts, .row.hov .acts { opacity: 1; visibility: visible; transition: opacity .15s ease-out, visibility 0s; }
+.row:focus-within .acts, .row.hov .acts { opacity: 1; visibility: visible; transition: opacity .15s ease-out, visibility 0s; }
+@media (hover: hover) { .row:hover .acts { opacity: 1; visibility: visible; transition: opacity .15s ease-out, visibility 0s; } }
 .acts.on { position: static; flex: none; padding: 0; background: none; opacity: 1; visibility: visible; transition: none; }
 .rb { width: 26px; height: 26px; border-radius: 50%; background: var(--panel); box-shadow: var(--shadow-rb);
   display: grid; place-items: center; color: var(--label2); transition: color .12s ease-out, transform .1s ease-out; }
-.rb:hover { color: var(--label); }
+@media (hover: hover) { .rb:hover { color: var(--label); } }
 .pv .ask { color: var(--label); font-weight: 500; }
 /* k10b: "Compact?" on the meta line of an idle chat with a big context; static, so nothing to reduce. */
 .pv .tag { display: inline-block; font-size: 11px; font-weight: 500; line-height: 15px; padding: 0 6px; border-radius: var(--r-full);
@@ -166,9 +215,13 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .pick { margin: 2px 8px 6px 48px; padding: 4px; border-radius: var(--r-row); background: var(--panel); box-shadow: var(--shadow-rb); }
 .pick-h { font-size: 11px; color: var(--label2); padding: 4px 8px 2px; }
 .pick button { display: flex; flex-direction: column; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; min-width: 0; }
-.pick button:hover { background: var(--hover); }
+@media (hover: hover) { .pick button:hover { background: var(--hover); } }
 .pick .nm, .pick .pv { display: block; max-width: 100%; }
 /* "N idle" group row: the toggle fills the row; Close all (or its confirm) sits at the end. */
+/* k38: another computer's group header: quiet, like the section heading; "offline" muted */
+.mh { padding: 10px 8px 2px; font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mh .mn { font-weight: 500; }
+.mh.off { color: var(--label3); }
 .row.grp { min-height: 36px; padding: 0 8px 0 0; gap: 6px; }
 .grp-t { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; align-self: stretch; padding: 6px 0 6px 8px;
   text-align: left; border-radius: var(--r-row); }
@@ -179,7 +232,7 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .chev svg { width: 13px; height: 13px; transition: transform .2s var(--ease-out); }
 [aria-expanded="true"] > .chev svg { transform: rotate(90deg); }
 .pill.quiet { background: none; color: var(--label2); padding: 4px 9px; transition: background-color .12s ease-out, color .12s ease-out, transform .1s ease-out; }
-.pill.quiet:hover { background: var(--pill); color: var(--label); }
+@media (hover: hover) { .pill.quiet:hover { background: var(--pill); color: var(--label); } }
 .pill { font-size: 12px; font-weight: 500; border-radius: var(--r-full); padding: 5px 12px; background: var(--pill); white-space: nowrap; flex: none;
   transition: transform .1s ease-out; }
 .pill.blue { background: linear-gradient(180deg, var(--blue-top), var(--blue2)); color: var(--on-accent); box-shadow: var(--shadow-blue); }
@@ -197,10 +250,10 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .bottom .sp { margin-left: auto; display: flex; gap: 6px; }
 .ic { width: 28px; height: 28px; border-radius: 50%; background: var(--pill); display: grid; place-items: center; color: var(--label2);
   transition: background-color .12s ease-out, color .12s ease-out, transform .1s ease-out; }
-.ic:hover { background: var(--sel); color: var(--label); }
+@media (hover: hover) { .ic:hover { background: var(--sel); color: var(--label); } }
 .ic svg { width: 14px; height: 14px; transition: transform .35s var(--ease-out); }
 /* The gear turns a little on hover (an eighth: its spokes line up again); the theme disc turns half with the theme. */
-.ic[data-do="settings"]:hover svg { transform: rotate(45deg); }
+@media (hover: hover) { .ic[data-do="settings"]:hover svg { transform: rotate(45deg); } }
 .ic[data-do="theme"] svg { transition-duration: .45s; }
 :root[data-theme="dark"] .ic[data-do="theme"] svg { transform: rotate(180deg); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -260,6 +313,64 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
 .foot { display: flex; align-items: center; gap: 6px; padding: 10px 4px 2px; border-top: .5px solid var(--line); }
 .foot .l { margin-right: auto; font-size: 12px; color: var(--label2); min-width: 0; }
 
+/* Settings › Phone (k27, Mac only): the pairing code, its line and countdown. */
+.it.col.qrb { align-items: center; text-align: center; gap: 8px; padding: 14px 0 12px; }
+.qrw { padding: 10px; border-radius: 14px; background: var(--qr-bg); box-shadow: 0 0 0 .5px var(--line); line-height: 0; }
+.qr { display: block; width: 160px; height: 160px; image-rendering: pixelated; }
+.qrt { font-weight: 500; max-width: 240px; text-wrap: balance; }
+.qrl { font-variant-numeric: tabular-nums; margin-top: 0; }
+
+/* ---------- Phone (k27): the same panel served by `kadans serve`, added to the home screen. panel.js sets
+   html[data-shell="phone"] in HTTP mode only. 16 px gutters plus the safe areas, 44 px touch targets, the page scrolls
+   (not the list), and nothing that needs a hover: a tap on a row shows its actions (.hov). ---------- */
+html[data-shell="phone"], html[data-shell="phone"] body { background: var(--panel); }
+html[data-shell="phone"] body { font-size: 15px; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+html[data-shell="phone"] .panel { max-height: none; min-height: 100vh; min-height: 100dvh; border-radius: 0; overflow: visible;
+  padding: 12px 16px 16px; }
+html[data-shell="phone"] .panel.tall { height: auto; }
+html[data-shell="phone"] .list { overflow: visible; }
+html[data-shell="phone"] .sbody { overflow: visible; padding: 0 0 8px; }
+html[data-shell="phone"] .card { padding: 14px 16px 15px; }
+html[data-shell="phone"] .lrow .r, html[data-shell="phone"] .note, html[data-shell="phone"] .msg .s, html[data-shell="phone"] .pv,
+html[data-shell="phone"] .sh, html[data-shell="phone"] .gl, html[data-shell="phone"] .it .d, html[data-shell="phone"] .empty .s,
+html[data-shell="phone"] .cwhy, html[data-shell="phone"] .toggle, html[data-shell="phone"] .acct { font-size: 13px; }
+html[data-shell="phone"] .acct button { min-height: 36px; }
+html[data-shell="phone"] .row { min-height: 60px; padding: 8px 10px; gap: 12px; }
+html[data-shell="phone"] .row.grp { min-height: 48px; }
+html[data-shell="phone"] .row.child { min-height: 40px; padding-top: 4px; padding-bottom: 4px; }
+html[data-shell="phone"] .row:not(.child):not(.grp) .av { width: 34px; height: 34px; }
+html[data-shell="phone"] .row:focus-within:not(.hov) { background: none; }
+html[data-shell="phone"] .row:focus-within:not(.hov) .acts:not(.on) { opacity: 0; visibility: hidden; }
+html[data-shell="phone"] .acts { gap: 6px; right: 6px; padding-left: 28px; }
+html[data-shell="phone"] .rb { width: 40px; height: 40px; position: relative; }
+html[data-shell="phone"] .rb::before { content: ""; position: absolute; inset: -2px; }
+/* Controls drawn smaller than 44 px get a transparent 44 px tall hit area (::before; the switch knob is ::after). */
+html[data-shell="phone"] :is(.pill, .sure, .seg button, .acct button) { position: relative; }
+html[data-shell="phone"] :is(.sw, .pill, .sure, .seg button, .acct button)::before { content: ""; position: absolute; left: 0; right: 0;
+  top: 50%; height: max(100%, 44px); transform: translateY(-50%); }
+html[data-shell="phone"] .rb svg { width: 16px; height: 16px; }
+html[data-shell="phone"] .sure, html[data-shell="phone"] .pill { font-size: 14px; min-height: 40px; padding: 0 16px; display: inline-flex; align-items: center; }
+html[data-shell="phone"] .pick button { min-height: 44px; padding: 8px 10px; }
+/* k29: the quiet "Use it in Safari instead" lines up with the text above it (its tap area keeps the padding) */
+html[data-shell="phone"] .msg .pill.quiet[data-do="pair-here"] { margin-left: -16px; }
+html[data-shell="phone"] .pick-h { font-size: 12px; }
+html[data-shell="phone"] .ic { width: 44px; height: 44px; }
+html[data-shell="phone"] .ic svg { width: 18px; height: 18px; }
+html[data-shell="phone"] .bottom { padding: 12px 4px 0; }
+html[data-shell="phone"] .toggle { min-height: 44px; }
+html[data-shell="phone"] .sw { width: 46px; height: 28px; border-radius: 14px; }
+html[data-shell="phone"] .sw::after { width: 24px; height: 24px; }
+html[data-shell="phone"] .sw[aria-checked="true"]::after { transform: translateX(18px); }
+html[data-shell="phone"] .top { padding: 0 0 10px; }
+html[data-shell="phone"] .top .ttl { font-size: 17px; }
+html[data-shell="phone"] .sgrp { padding: 2px 14px; }
+html[data-shell="phone"] .it { min-height: 52px; padding: 10px 0; }
+html[data-shell="phone"] .it.col input[type="range"] { height: 32px; }
+html[data-shell="phone"] input[type="range"]::-webkit-slider-thumb { width: 24px; height: 24px; margin-top: -10px; }
+html[data-shell="phone"] .seg { font-size: 13px; }
+html[data-shell="phone"] .seg button { min-height: 32px; padding: 0 10px; }
+
 /* ---------- Motion (k9a). JS adds these classes only after the first paint, never with reduced motion. ---------- */
 /* Press feedback */
 .pill:active, .sure:active, .seg button:active, .acct button:active, .pick button:active { transform: scale(.97); }
@@ -298,6 +409,24 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: var(--focu
   6% { transform: translateY(-3px) scale(.97, 1.04); animation-timing-function: cubic-bezier(.5,0,.8,.5); }
   11% { transform: scale(1.04, .95); animation-timing-function: cubic-bezier(.2,.7,.3,1); }
   16%, 100% { transform: none; }
+}
+
+/* k32: arranging. The held row and its sub-agents ride above a plate (the shadow and the lift); the others glide out of
+   the way on translate only. Lift and eyes only without reduced motion; the plate still shows which row is held. */
+.list.arranging .row { background: none; }
+.list.arranging .acts { opacity: 0; visibility: hidden; transition: none; }
+.list.arranging .row:not(.carried) { transition: translate .2s var(--ease-out); }
+.row.carried { z-index: 2; }
+.plate { position: absolute; left: 8px; right: 8px; z-index: 1; border-radius: var(--r-row); background: var(--lift-bg);
+  box-shadow: var(--shadow-lift); opacity: 0; pointer-events: none; transition: opacity .18s ease-out, scale .18s var(--ease-out); }
+.plate.on { opacity: 1; }
+.plate.out, .row.carried.out { opacity: .6; }
+.row.lift .bw { animation-play-state: paused; }
+.av .fc { transition: scale .16s var(--ease-out); }
+@media (prefers-reduced-motion: no-preference) {
+  .row.carried { transition: scale .18s var(--ease-out), opacity .15s ease-out; }
+  .row.carried.lift, .plate.on { scale: 1.02; }
+  .row.lift .fc { scale: 1.12 1.3; } /* eyes widen while held */
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

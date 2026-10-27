@@ -19,7 +19,8 @@ window.KF = (function () {
     tokens: 182000, startedAt: N - 11 * M, lastSeen: N - 20000, status: 'working', firstPrompt: 'Write the brake hooks',
     subagents: [], pid: 50001, orca: null }, o);
   const base = () => [
-    agent('fx-0001', { title: 'Brake hooks for the Stop event', titleSource: 'session', subagents: [{ id: 'fx-sub-1', type: 'Explore', description: 'Reading the hooks docs', status: 'running' }] }),
+    agent('fx-0001', { title: 'Brake hooks for the Stop event', titleSource: 'session', subagentTokens: 300000,
+      subagents: [{ id: 'fx-sub-1', type: 'Explore', description: 'Reading the hooks docs', status: 'running', tokens: 120000, context: 45000 }] }),
     agent('fx-0002', { project: 'Quarry', model: 'claude-sonnet-4-6', tokens: 54000, startedAt: N - 6 * M, status: 'needs-you',
       firstPrompt: 'Pick a login provider' }),
     agent('fx-0003', { project: 'Fernway', model: 'claude-sonnet-4-6', tokens: 12000, startedAt: N - 3 * M,

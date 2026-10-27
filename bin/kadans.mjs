@@ -2,24 +2,33 @@
 // kadans: pace Claude Code usage limits and list running agents. Commands: see HELP.
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
+import { isIPv4 } from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountKey, appendSample, configDir, kadansHome, listAccounts, readSamples, sampleFromPayload } from '../lib/samples.mjs';
+import { accountKey, actionable, appendSample, configDir, kadansHome, listAccounts, readSamples, sampleFromPayload } from '../lib/samples.mjs';
+import { NAME as CODEX_NAME, codexEnabled, isCodexSamples, renderSync, syncCodex, syncJson } from '../lib/codex.mjs';
 import { loadConfig, overall } from '../lib/pace.mjs';
 import { renderAge, renderLine } from '../lib/render.mjs';
 import { HOOK_LOCK_WAIT_MS, IMPORTANCE, addProject, addTask, readProjects, readTasks, setLockWait, updateTask } from '../lib/store.mjs';
 import { rankTasks } from '../lib/pick.mjs';
 import { notifyBrakeOnce, runPretool, runStop } from '../lib/hooks.mjs';
+import { runLean } from '../lib/lean.mjs';
 import { notify } from '../lib/notify.mjs';
 import { kadansCommand, plan } from '../lib/install.mjs';
 import { configView, setSetting } from '../lib/config.mjs';
-import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
+import { remoteCaller } from '../lib/remote.mjs';
+import { ORCA_TIMEOUT_MS, briefOf, compactAgent, findAgent, listAgents, listAgentsAsync, orcaRunner, readBrief, readCache, renderAgents, runEvent, stopAgent } from '../lib/agents.mjs';
+import { refresh as refreshTitles, triggerRefresh } from '../lib/smart-titles.mjs';
 import { setTitle } from '../lib/titles.mjs';
+import { ORDER_MAX, setOrder } from '../lib/order.mjs';
 import { MODE_OF, clearAutoPause, ownKey, parseUntil, runPacePost, runPacePre, setAutopace, setPace, windowOf } from '../lib/pace-control.mjs';
 import { checkStartable, describePlan, replaceAgent, startPlan, startTask } from '../lib/launch.mjs';
 import { fetchUsage, readUsageState, renderUsage, usageJson } from '../lib/usage-api.mjs';
 import { renderTick, runTick, tickJson } from '../lib/autogas.mjs';
+import { listDevices, newPairCode, revokeDevice } from '../lib/phone.mjs';
+import { DEFAULT_PORT, clearServeInfo, cliRunner, createPhoneServer, pickHost, readServeInfo, writeServeInfo } from '../lib/serve.mjs';
+import { stripControl } from '../lib/text.mjs';
 import { KICKOFF_ARGV, applySchedule, decide, describeSchedule, kickoffEnv, readKickoffState, runKickoff, schedulePlan } from '../lib/kickoff.mjs';
 
 const HELP = `kadans: pace Claude Code usage limits
@@ -28,6 +37,7 @@ Usage:
   kadans statusline   read the status line payload on stdin, record a sample,
                       run the chained status line (output dropped), print one line
   kadans status [--json]   show every recorded account (--json: the panel's data)
+  kadans codex sync [--json]   read Codex CLI limits from ~/.codex/sessions (read-only; shown, never acted on)
   kadans project add <name> <path> [--importance high|normal|low]   (proje ekle, --onem)
   kadans project list                                               (proje liste)
   kadans task add <project> "<text>" [--urgent|--week|--idle] [--approved]
@@ -42,11 +52,14 @@ Usage:
   kadans agents [--json] [--all]   running Claude Code agents (and Orca's); the text list leaves out agents
                       idle for 2+ hours (JSON marks them stale: true); --all lists them and ended ones
   kadans agents --brief --json     {"working","needsYou","t"} for the menu bar (no transcript reads)
+  kadans progress <done>/<total> ["<step>"]   for agents: report progress (does nothing; the agent list reads it
+                             from the transcript)
   kadans agent stop <id>     stop one agent (Orca terminal close, else SIGTERM to its pid)
   kadans agent compact <id> [--dry-run]   type /compact into an idle chat's Orca terminal (orca terminal send);
                       refused for working, waiting or ended chats, a chat with unsent text in its input line, and
                       outside Orca (type /compact there yourself)
   kadans agent title <id> "<text>"   set the agent's title ("" clears it)
+  kadans agent order <id> [<id> ...]   show these agents first, in this order (ended ones drop out)
   kadans agent replace <agentId> <taskId> [--dry-run]   stop the agent, then task start
   kadans agent pace <id> slow|pause|none [--until reset|30m]   slow (wait before each tool call), pause
                       (halt before its next tool) or resume one of your own sessions; default --until reset
@@ -54,14 +67,17 @@ Usage:
   kadans usage fetch [--json]   read your own account's usage (~/.claude) from Claude's usage endpoint and record
                       it as a sample; Keychain item "Claude Code-credentials", never the refresh token; at most
                       once a minute, backs off after errors; off with config usageApi false
-  kadans hook stop|pretool|event|pace-pre|pace-post   Claude Code hooks (hook JSON on stdin; never fail)
+  kadans hook stop|pretool|event|pace-pre|pace-post|lean   Claude Code hooks (hook JSON on stdin; never fail)
   kadans config get [--json]           show the settings the app can change
   kadans config set <key> <value>      limits auto|five_hour|five_hour,seven_day, targets.five_hour|targets.seven_day
-                      50-100, slack 0-30, warmup.minutes 0-60, warmup.pct 0-50, notify|autopace|usageApi true|false,
+                      50-100, slack 0-30, warmup.minutes 0-60, warmup.pct 0-50, notify|autopace|usageApi|codex true|false,
                       lang en|tr, accounts.<own key>.gas true|false (your own account only),
                       kickoff.enabled true|false, kickoff.from|kickoff.to HH:MM,
                       compact.soonPct 10-95 (% of the context window) or 101 (Off), compact.nowPct 10-95,
-                      compact.idleMin 1-120, autoGas true|false, autoGasMax 1-3, autoGasMinRamGB 0.5-16
+                      compact.idleMin 1-120, autoGas true|false, autoGasMax 1-3, autoGasMinRamGB 0.5-16,
+                      phone true|false (the app keeps kadans serve running while true)
+  kadans titles refresh [--dry-run] [--json]   name the own account's live chats from their latest prompts
+                      (one Haiku call at most; \`kadans agents\` starts it once a minute; config smartTitles)
   kadans kickoff [--dry-run]   start the next 5-hour window with one tiny Haiku message (claude -p, own account),
                       only if kickoff.enabled, inside kickoff.from-kickoff.to, and the window has ended
   kadans kickoff schedule|unschedule [--apply]   preview (or write and load) the launchd job that runs
@@ -71,6 +87,11 @@ Usage:
                       or no window runs (then the start opens one); needs accounts.<own key>.gas and autoGas true;
                       caps: autoGasMax auto-started tasks running, 10 min apart, a failed task waits for the next window,
                       autoGasMinRamGB free; --json: {"started": <task id or null>, "why": "<code>"}
+  kadans serve [--host <ip>] [--port <n>]   phone control: serve the panel and its API to paired phones
+                      (default: this Mac's Tailscale address, else its LAN address, port 7477; never 0.0.0.0);
+                      needs config phone true; prints {"url","host","port","pid"}, runs until SIGTERM
+  kadans pair [--json]   a one-time pair link for a phone (needs a running serve; valid 10 min, one use)
+  kadans devices [--json]   paired phones; kadans devices revoke <id> unpairs one at once
   kadans install [--apply] [--json]   preview (or write, with backup) settings.json changes
   kadans uninstall [--apply] preview (or write, with backup) removing them
   kadans --help       show this help
@@ -228,20 +249,30 @@ function statusJson(env, now = Date.now()) {
     };
     // The own account is always the main ~/.claude, even when CLAUDE_CONFIG_DIR points at another profile.
     const ownKey = accountKey(join(homedir(), '.claude'));
+    if (codexEnabled(cfg, env)) syncCodex(home, env, { cfg, now }); // bounded; never throws
     for (const key of listAccounts(home)) {
       const samples = readSamples(home, key);
       if (samples.length === 0) continue;
-      const res = overall(samples, now, cfg);
-      const own = key === ownKey;
+      // Codex (lib/codex.mjs): shown with its own windows, never acted on (no gas, brake, feed or pace).
+      const codex = isCodexSamples(samples);
+      if (codex && cfg.codex === false) continue;
+      const res = overall(samples, now, codex ? { ...cfg, limits: 'auto' } : cfg);
+      const own = !codex && key === ownKey;
+      const label = codex ? CODEX_NAME : own ? 'Your account' : 'Other account';
+      const lastSrc = samples[samples.length - 1].source;
       out.accounts.push({
         key,
-        label: own ? 'Your account' : 'Other account',
+        kind: codex ? 'codex' : 'claude',
+        name: label,
+        label,
         configDir: own ? '~/.claude' : null,
         own,
+        acts: !codex, // false: Kadans shows this account's states but never acts on them
+        ...(codex && samples[samples.length - 1].plan ? { plan: samples[samples.length - 1].plan } : {}),
         gas: own && cfg.accounts[key]?.gas === true, // other accounts never throttle
         lastSample: samples[samples.length - 1].t,
         fresh: now - samples[samples.length - 1].t <= FRESH_MS,
-        lastSource: samples[samples.length - 1].source === 'api' ? 'api' : 'statusline',
+        lastSource: lastSrc === 'api' || lastSrc === 'codex' ? lastSrc : 'statusline',
         state: res.state,
         limit: res.limit,
         limits: res.limits.map(limitJson),
@@ -269,6 +300,7 @@ function status(args, env) {
   const home = kadansHome(env);
   const cfg = loadConfig(home);
   const now = Date.now();
+  if (codexEnabled(cfg, env)) syncCodex(home, env, { cfg, now });
   const accounts = listAccounts(home);
   if (accounts.length === 0) {
     process.stdout.write('no accounts recorded yet\n');
@@ -277,15 +309,17 @@ function status(args, env) {
   for (const key of accounts) {
     const samples = readSamples(home, key);
     if (samples.length === 0) continue;
-    const res = overall(samples, now, cfg);
+    const codex = isCodexSamples(samples);
+    if (codex && cfg.codex === false) continue;
+    const res = overall(samples, now, codex ? { ...cfg, limits: 'auto' } : cfg);
     const age = renderAge(now - samples[samples.length - 1].t, cfg.lang);
-    process.stdout.write(`${key}  ${renderLine(res, now, cfg.lang)}  (${age})\n`);
+    process.stdout.write(`${codex ? `${key} ${CODEX_NAME}` : key}  ${renderLine(res, now, cfg.lang)}  (${age})\n`);
   }
   return 0;
 }
 
 // Splits argv into positional words and --flags (--name value or --name=value; known switches take no value).
-const SWITCHES = new Set(['urgent', 'week', 'idle', 'acil', 'hafta', 'bos', 'all', 'hepsi', 'approved', 'onayli', 'apply', 'uygula', 'json', 'dry-run']);
+const SWITCHES = new Set(['urgent', 'week', 'idle', 'acil', 'hafta', 'bos', 'all', 'hepsi', 'approved', 'onayli', 'apply', 'uygula', 'json', 'dry-run', 'force-dev']);
 function parseArgs(args) {
   const pos = [];
   const flags = {};
@@ -425,22 +459,49 @@ function startCmd(home, ref, dryRun, env) {
 }
 
 // Hooks: any error means "no opinion" (allow), exit 0, nothing on stdout.
+// Lean mode rides on the hooks that already run (one node process per event): its additionalContext is appended to
+// whatever the pace hook said, and a pace decision (permissionDecision etc.) is kept as it is.
+function withLean(out, raw, env) {
+  let lean = '';
+  try {
+    lean = runLean(raw, env);
+  } catch {
+    return out;
+  }
+  if (!lean) return out;
+  if (!out) return lean;
+  try {
+    const a = JSON.parse(out);
+    const b = JSON.parse(lean);
+    const ha = a.hookSpecificOutput ?? (a.hookSpecificOutput = { hookEventName: b.hookSpecificOutput?.hookEventName });
+    const extra = b.hookSpecificOutput?.additionalContext;
+    if (extra) ha.additionalContext = ha.additionalContext ? `${ha.additionalContext}\n${extra}` : extra;
+    return JSON.stringify(a);
+  } catch {
+    return out;
+  }
+}
+
 async function hookCmd(kind, env) {
   let out = '';
   setLockWait(HOOK_LOCK_WAIT_MS); // every lock in this hook process: give up after 2 s rather than 10 s
   try {
     const raw = readFileSync(0, 'utf8');
+    // Kadans' own Haiku runs (smart titles) set KADANS_INTERNAL=1: no hook of ours acts on them or records them.
+    if (env.KADANS_INTERNAL === '1') return 0;
     if (kind === 'stop') out = runStop(raw, env);
     else if (kind === 'pretool') out = runPretool(raw, env);
-    else if (kind === 'pace-pre') out = await runPacePre(raw, env);
-    else if (kind === 'pace-post') out = await runPacePost(raw, env);
+    else if (kind === 'lean') out = runLean(raw, env);
+    else if (kind === 'pace-pre') out = withLean(await runPacePre(raw, env), raw, env);
+    else if (kind === 'pace-post') out = withLean(await runPacePost(raw, env), raw, env);
     else if (kind === 'event') {
       try {
         clearAutoPause(raw, env); // the owner typed: lift a pause set by auto-pace
       } catch {
         // never in the way of event logging
       }
-      runEvent(raw, env, { home: kadansHome(env) }); // prints nothing, ever
+      runEvent(raw, env, { home: kadansHome(env) }); // logs only
+      out = withLean('', raw, env); // SessionStart: the lean brief (nothing for other events)
     }
   } catch {
     out = '';
@@ -463,7 +524,7 @@ function paceCmd(home, pos, flags, env) {
     return 0;
   }
   const now = Date.now();
-  const ov = overall(readSamples(home, own), now, loadConfig(home));
+  const ov = overall(actionable(readSamples(home, own)), now, loadConfig(home));
   const until = parseUntil(flags.until, now, windowOf(ov));
   const e = setPace(home, agent.id, pos[1], { until, now });
   const till = e.until ? ` until ${new Date(e.until).toTimeString().slice(0, 5)}` : ' until resumed (no reset time known)';
@@ -492,7 +553,9 @@ async function agentsCmd(args, env) {
     process.stdout.write(`${JSON.stringify(brief)}\n`);
     return 0;
   }
-  const agents = await listAgentsAsync(home, opts);
+  // Smart titles (lib/smart-titles.mjs): a detached `kadans titles refresh`, at most once a minute, never waited for.
+  const trigger = () => triggerRefresh(home, { env, cfg: loadConfig(home) });
+  const agents = await listAgentsAsync(home, { ...opts, trigger, remote: remoteCaller(env) }); // --brief stays local
   process.stdout.write(flags.json ? `${JSON.stringify(agents, null, 2)}\n` : renderAgents(agents, Date.now(), { all }));
   return 0;
 }
@@ -506,6 +569,20 @@ function agentCmd(sub, args, env) {
     if (!agent) return fail(why);
     const t = setTitle(home, agent.id, pos.slice(1).join(' '));
     process.stdout.write(t ? `${agent.id}: title set: ${t}\n` : `${agent.id}: title cleared\n`);
+    return 0;
+  }
+  if (sub === 'order') {
+    // The owner's row order (drag to reorder in the panel): these ids first, in this order; every id must be listed now.
+    if (pos.length < 1 || pos.length > ORDER_MAX) return fail(`usage: kadans agent order <id> [<id> ...] (1 to ${ORDER_MAX} ids)`);
+    const list = listAgents(home, { run: orcaRunner(env), claudeDirs: [configDir(env)] });
+    const ids = [];
+    for (const ref of pos) {
+      const { agent, why } = findAgent(list, ref);
+      if (!agent) return fail(`order not saved: ${why}`);
+      ids.push(agent.id);
+    }
+    const stored = setOrder(home, ids);
+    process.stdout.write(`order saved: ${stored.length} agent${stored.length === 1 ? '' : 's'} first\n`);
     return 0;
   }
   if (sub === 'replace') {
@@ -541,7 +618,7 @@ ${agent.id}: ${r.how}
 `);
     return 0;
   }
-  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|replace|pace|compact <id> ...');
+  if (sub !== 'stop' || pos.length < 1) return fail('usage: kadans agent stop|title|order|replace|pace|compact <id> ...');
   const run = orcaRunner(env);
   const { agent, why } = findAgent(listAgents(kadansHome(env), { run, claudeDirs: [configDir(env)] }), pos[0]);
   if (!agent) return fail(why);
@@ -605,6 +682,34 @@ function configCmd(sub, args, env) {
   return fail('usage: kadans config get [--json] | kadans config set <key> <value>');
 }
 
+// `kadans titles refresh [--dry-run] [--json]` (lib/smart-titles.mjs). Own account only (~/.claude), whatever
+// CLAUDE_CONFIG_DIR says. At most one Haiku call per run; the dry run lists the chats it would title (counts only).
+function titlesCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos[0] !== 'refresh' || pos.length > 1) return fail('usage: kadans titles refresh [--dry-run] [--json]');
+  const home = kadansHome(env);
+  const cfg = loadConfig(home);
+  const own = ownKey();
+  const dir = join(homedir(), '.claude');
+  const now = Date.now();
+  const agents = listAgents(home, { claudeDirs: [dir], now, brief: false }); // no Orca here: leave the menu bar brief alone
+  const r = refreshTitles(home, { agents, scans: readCache(home), cfg, samples: actionable(readSamples(home, own)), env, now, own, dir, dryRun: Boolean(flags['dry-run']) });
+  const short = (id) => (id ? String(id).slice(0, 8) : null);
+  const out = { dryRun: Boolean(flags['dry-run']), gate: r.code, why: r.why, pick: short(r.pick), ran: r.ran, ok: r.ok ?? null,
+    candidates: r.candidates.map((c) => ({ ...c, id: short(c.id) })), skipped: r.skipped };
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+    return 0;
+  }
+  const lines = [`${out.dryRun ? 'dry run: ' : ''}${r.why}`];
+  for (const c of out.candidates) lines.push(`  ${c.id}  ${c.project ?? '-'}  prompts ${c.prompts} (+${c.newPrompts})  ${c.why}${c.id === out.pick ? '  <- next' : ''}`);
+  const sk = Object.entries(out.skipped).map(([k, n]) => `${k} ${n}`).join(', ');
+  if (sk) lines.push(`  skipped: ${sk}`);
+  if (out.dryRun) lines.push('preview: nothing run, no titles written');
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return 0;
+}
+
 // `kadans kickoff [--dry-run]` and `kadans kickoff schedule|unschedule [--apply]` (lib/kickoff.mjs).
 function kickoffCmd(args, env) {
   const { pos, flags } = parseArgs(args);
@@ -621,7 +726,7 @@ function kickoffCmd(args, env) {
   }
   if (sub !== undefined) return fail('usage: kadans kickoff [--dry-run] | kadans kickoff schedule|unschedule [--apply]');
   const cfg = loadConfig(home);
-  const samples = () => readSamples(home, ownKey());
+  const samples = () => actionable(readSamples(home, ownKey()));
   const now = Date.now();
   if (flags['dry-run']) {
     const d = decide({ cfg, samples: samples(), state: readKickoffState(home), now });
@@ -654,7 +759,7 @@ function gasCmd(args, env) {
   };
   const r = runTick(home, loadConfig(home), {
     own,
-    samples: () => readSamples(home, own),
+    samples: () => actionable(readSamples(home, own)),
     dryRun: Boolean(flags['dry-run']),
     start,
   });
@@ -672,6 +777,85 @@ async function usageCmd(args, env) {
   return r.ok || ['off', 'too_soon', 'backoff', 'no_token', 'busy'].includes(r.code) ? 0 : 1;
 }
 
+// `kadans codex sync [--json]`: Codex CLI limits from its session logs, read-only. Percentages only.
+function codexCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos[0] !== 'sync' || pos.length !== 1) return fail('usage: kadans codex sync [--json]');
+  const home = kadansHome(env);
+  const r = syncCodex(home, env, { cfg: loadConfig(home) });
+  process.stdout.write(flags.json ? `${JSON.stringify(syncJson(r))}\n` : `${renderSync(r)}\n`);
+  return r.ok || ['off', 'no_codex', 'busy'].includes(r.code) ? 0 : 1;
+}
+
+// `kadans serve [--host <ip>] [--port <n>] [--force-dev]` (lib/serve.mjs). --force-dev skips the phone setting (tests).
+function serveCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos.length) return fail('usage: kadans serve [--host <ip>] [--port <n>]');
+  const home = kadansHome(env);
+  if (!loadConfig(home).phone && !flags['force-dev']) return fail('refused: phone control is off (kadans config set phone true)');
+  let host = flags.host;
+  if (host === undefined) {
+    const p = pickHost(networkInterfaces());
+    if (!p) return fail('no Tailscale or LAN address found; pass --host <ip>');
+    host = p.host;
+  }
+  if (typeof host !== 'string' || !isIPv4(host) || host === '0.0.0.0') return fail('--host must be one IPv4 address of this Mac (never 0.0.0.0)');
+  const rawPort = flags.port === undefined ? String(DEFAULT_PORT) : String(flags.port);
+  const port = Number(rawPort);
+  if (!/^\d{1,5}$/.test(rawPort) || port > 65535 || (port !== 0 && port < 1024)) return fail('--port must be 1024-65535');
+  if (readServeInfo(home)) return fail(`kadans serve is already running (see ${join(home, 'serve.json')})`);
+  const server = createPhoneServer({ home, run: cliRunner({ env }), requirePhone: !flags['force-dev'] });
+  return new Promise((done) => {
+    server.once('error', (e) => done(fail(`cannot listen on ${host}:${port}: ${e.code ?? e.message}`)));
+    server.listen(port, host, () => {
+      const a = server.address();
+      const info = { url: `http://${host}:${a.port}`, host, port: a.port, pid: process.pid };
+      writeServeInfo(home, info);
+      process.stdout.write(`${JSON.stringify(info)}\n`);
+      const stop = () => {
+        server.flushSeen();
+        clearServeInfo(home);
+        server.close(() => done(0));
+        server.closeAllConnections();
+      };
+      process.once('SIGTERM', stop);
+      process.once('SIGINT', stop);
+    });
+  });
+}
+
+// `kadans pair [--json]`: a new one-time code (replaces an unused one). The code appears only inside the URL.
+function pairCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  if (pos.length) return fail('usage: kadans pair [--json]');
+  const home = kadansHome(env);
+  const info = readServeInfo(home);
+  if (!info) return fail('kadans serve is not running (turn phone control on in the app, or run kadans serve)');
+  const { code, expiresAt } = newPairCode(home);
+  const url = `http://${info.host}:${info.port}/#pair=${code}`;
+  if (flags.json) process.stdout.write(`${JSON.stringify({ url, expiresAt })}\n`);
+  else process.stdout.write(`${url}\nOpen it on your phone within 10 minutes; it works once.\n`);
+  return 0;
+}
+
+// `kadans devices [--json]` and `kadans devices revoke <id>`.
+function devicesCmd(args, env) {
+  const { pos, flags } = parseArgs(args);
+  const home = kadansHome(env);
+  if (pos[0] === 'revoke') {
+    if (pos.length !== 2) return fail('usage: kadans devices revoke <id>');
+    if (!revokeDevice(home, pos[1])) return fail(`no paired device ${stripControl(pos[1]).slice(0, 40)}`);
+    process.stdout.write(`revoked ${pos[1]}\n`);
+    return 0;
+  }
+  if (pos.length) return fail('usage: kadans devices [--json] | kadans devices revoke <id>');
+  const list = listDevices(home);
+  if (flags.json) process.stdout.write(`${JSON.stringify(list)}\n`);
+  else if (!list.length) process.stdout.write('no paired devices\n');
+  else for (const d of list) process.stdout.write(`${d.id}  ${d.name}  last seen ${new Date(d.lastSeenAt).toISOString()}\n`);
+  return 0;
+}
+
 function main(argv, env = process.env) {
   const cmd = argv[0];
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') {
@@ -683,9 +867,11 @@ function main(argv, env = process.env) {
     if (line) process.stdout.write(`${line}\n`);
     return 0;
   }
+  if (cmd === 'progress') return 0; // k35: a no-op on purpose, any arguments; the transcript scan reads the command
   if (cmd === 'status') return status(argv.slice(1), env);
   if (cmd === 'hook') return hookCmd(argv[1], env);
   if (cmd === 'usage') return usageCmd(argv.slice(1), env);
+  if (cmd === 'codex') return codexCmd(argv.slice(1), env);
   try {
     if (cmd === 'project' || cmd === 'proje') return projectCmd(argv[1], argv.slice(2), env);
     if (cmd === 'task' || cmd === 'gorev' || cmd === 'görev') return taskCmd(argv[1], argv.slice(2), env);
@@ -698,13 +884,20 @@ function main(argv, env = process.env) {
     if (cmd === 'autopace') return autopaceCmd(argv.slice(1), env);
     if (cmd === 'config') return configCmd(argv[1], argv.slice(2), env);
     if (cmd === 'kickoff') return kickoffCmd(argv.slice(1), env);
+    if (cmd === 'titles') return titlesCmd(argv.slice(1), env);
     if (cmd === 'gas') return gasCmd(argv.slice(1), env);
+    if (cmd === 'serve') return serveCmd(argv.slice(1), env);
+    if (cmd === 'pair') return pairCmd(argv.slice(1), env);
+    if (cmd === 'devices') return devicesCmd(argv.slice(1), env);
   } catch (e) {
     return fail(e.message);
   }
   process.stderr.write(`kadans: unknown command "${cmd}"\n\n${HELP}`);
   return 2;
 }
+
+// A reader that stops early (`kadans status | head -1`) closes the pipe: end quietly instead of crashing on EPIPE.
+process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); throw e; });
 
 Promise.resolve(main(process.argv.slice(2))).then((code) => {
   process.exitCode = code;

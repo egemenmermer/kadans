@@ -22,24 +22,24 @@ const brake = {
 };
 
 test('default line is English (no lang argument)', () => {
-  assert.equal(renderLine(cruise, 0), '5h 59% · 0.3%/min · ~92% at reset, ~8% unused · 3h36m left · CRUISE');
-  assert.equal(renderLine(gas, 0), '5h 40% · 0.1%/min · ~70% at reset, ~30% unused · 2h00m left · GAS: ~30% will go unused');
+  assert.equal(renderLine(cruise, 0), '5h 59% · 0.3%/min · ~92% at reset, ~8% unused · 3h36m to reset · CRUISE');
+  assert.equal(renderLine(gas, 0), '5h 40% · 0.1%/min · ~70% at reset, ~30% unused · 2h00m to reset · GAS: ~30% will go unused');
   assert.equal(
     renderLine(brake, 0),
-    '5h 68% · 0.6%/min · runs out ~22:39, 2h21m before reset · 3h09m left · BRAKE: runs out ~22:39 (reset 01:00)',
+    '5h 68% · 0.6%/min · runs out ~22:39, 2h21m before reset · 3h09m to reset · BRAKE: runs out ~22:39 (reset 01:00)',
   );
   assert.doesNotMatch(renderLine(brake, 0), /186/);
 });
 
 test('config lang "tr" selects the Turkish line', () => {
-  assert.equal(renderLine(cruise, 0, 'tr'), '5s %59 · 0,3%/dk · sıfırlanmada ~%92, ~%8 boşa · 3s36dk kaldı · SEYİR');
-  assert.equal(renderLine(gas, 0, 'tr'), '5s %40 · 0,1%/dk · sıfırlanmada ~%70, ~%30 boşa · 2s0dk kaldı · GAZ: ~%30 boşa gidecek');
+  assert.equal(renderLine(cruise, 0, 'tr'), '5s %59 · 0,3%/dk · sıfırlanmada ~%92, ~%8 boşa · 3s36dk sonra sıfırlanır · SEYİR');
+  assert.equal(renderLine(gas, 0, 'tr'), '5s %40 · 0,1%/dk · sıfırlanmada ~%70, ~%30 boşa · 2s0dk sonra sıfırlanır · GAZ: ~%30 boşa gidecek');
   const b = {
     state: 'brake',
     limit: 'five_hour',
     limits: [{ name: 'five_hour', state: 'brake', pct: 50, needle: 0.7, projection: 134, timeLeft: 120 * MIN, brakeAt: at(17, 40), resetsAt: at(18, 20) }],
   };
-  assert.equal(renderLine(b, 0, 'tr'), "5s %50 · 0,7%/dk · 17:40'te biter, sıfırlanmadan 40dk önce · 2s0dk kaldı · FREN: ~17:40'te biter (sıfırlanma 18:20)");
+  assert.equal(renderLine(b, 0, 'tr'), "5s %50 · 0,7%/dk · 17:40'te biter, sıfırlanmadan 40dk önce · 2s0dk sonra sıfırlanır · FREN: ~17:40'te biter (sıfırlanma 18:20)");
 });
 
 test('projection below 100 shows percent and unused, 100 or more shows when it runs out', () => {
@@ -66,7 +66,7 @@ test('two limits, no data and unknown', () => {
   };
   assert.equal(
     renderLine(two, 0, 'en'),
-    '5h 40% · 0.1%/min · ~80% at reset, ~20% unused · 1h00m left | 7d 20% · 0.0%/min · ~70% at reset, ~30% unused · 3d0h left · GAS: ~30% will go unused',
+    '5h 40% · 0.1%/min · ~80% at reset, ~20% unused · 1h00m to reset | 7d 20% · 0.0%/min · ~70% at reset, ~30% unused · 3d0h to reset · GAS: ~30% will go unused',
   );
   assert.equal(renderLine({ state: 'unknown', limit: null, limits: [{ name: 'five_hour', state: 'nodata' }] }, 0), '5h no data · LOW DATA');
   assert.equal(renderLine({ state: 'unknown', limit: null, limits: [{ name: 'five_hour', state: 'nodata' }] }, 0, 'tr'), '5s veri yok · VERİ AZ');

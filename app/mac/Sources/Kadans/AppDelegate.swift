@@ -50,6 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var lastBrief: Brief?
     /// k25: the spare-quota check (`gas tick --json`) every 5 min and after each window reset, popover open or closed.
     private let autoGas = AutoGas()
+    /// k28: the `kadans serve` child while config `phone` is true, pairing and the device list.
+    private let phone = Phone()
+    private var termSource: DispatchSourceSignal?
 
     /// Dev and measuring only: KADANS_NO_USAGE_FETCH=1 never runs `usage fetch`; KADANS_FAKE_WORKING=<n> stands in for the
     /// brief's working count (until `agents --brief --json` exists).
@@ -89,7 +92,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             guard let self, self.popover.isShown else { return }
             self.blinker.setWorking(self.fakeWorking ?? Brief.working(inAgents: agents))
         }
-        panel.onConfig = { [weak self] cfg in self?.autoGas.noteConfig(cfg) }
+        panel.onConfig = { [weak self] cfg in
+            self?.autoGas.noteConfig(cfg)
+            self?.phone.noteConfig(cfg) // the launch refresh's config starts serve when phone is true
+        }
+        panel.phone = phone
+        // A plain SIGTERM would skip applicationWillTerminate and leave the serve child running: quit properly instead.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { NSApp.terminate(nil) }
+        term.resume()
+        termSource = term
         panel.onLoaded = { [weak self] in self?.panel.refresh(full: true) }
         panel.load()
 
@@ -104,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if self.popover.isShown { self.panelGate.request() } else { self.briefGate.request(); self.statusGate.request() }
         }
         autoGas.start()
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        phone.serve.shutdown()
     }
 
     // MARK: push refresh (k19)
@@ -313,7 +330,8 @@ struct MenuBarItem {
 
     init(status: [String: Any]?) {
         let accounts = status?["accounts"] as? [[String: Any]] ?? []
-        let acct = accounts.first { ($0["own"] as? Bool) == true } ?? accounts.first
+        // The own account, else the first one Kadans acts on (Codex is shown only, never the menu-bar default).
+        let acct = accounts.first { ($0["own"] as? Bool) == true } ?? accounts.first { ($0["acts"] as? Bool) != false } ?? accounts.first
         let limits = acct?["limits"] as? [[String: Any]] ?? []
         let named = acct?["limit"] as? String
         func pct(_ l: [String: Any]) -> Double { (l["pct"] as? NSNumber)?.doubleValue ?? -1 }

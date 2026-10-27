@@ -2,6 +2,7 @@ import AppKit
 
 // Kadans menu bar app. `Kadans --snapshot <out.png> [--fixture <name>] [--theme light|dark]` renders the panel to a PNG and quits.
 // `Kadans --menubar-frames <dir>` writes the menu bar blob frames (every face: open, closed, glancing) as PNGs and quits.
+// `Kadans --qr <url> <out.png>` writes a pairing QR code and checks that it reads back (k28).
 
 let args = CommandLine.arguments
 func value(after flag: String) -> String? {
@@ -11,7 +12,21 @@ func value(after flag: String) -> String? {
 
 let app = NSApplication.shared
 
-if let dir = value(after: "--menubar-frames") {
+if let url = value(after: "--qr") {
+    // k28 debug path: `Kadans --qr <url> <out.png>` writes the pairing QR for <url>, reads it back and prints what it says.
+    app.setActivationPolicy(.prohibited)
+    guard let i = args.firstIndex(of: "--qr"), i + 2 < args.count, let png = PhoneQR.png(url) else {
+        FileHandle.standardError.write(Data("usage: Kadans --qr <url> <out.png>\n".utf8))
+        exit(2)
+    }
+    do { try png.write(to: URL(fileURLWithPath: Config.expand(args[i + 2]))) } catch {
+        FileHandle.standardError.write(Data("qr: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    let back = PhoneQR.decode(png)
+    print("qr: \(png.count) bytes; reads back: \(back ?? "(nothing)"); match: \(back == url)")
+    exit(back == url ? 0 : 1)
+} else if let dir = value(after: "--menubar-frames") {
     app.setActivationPolicy(.prohibited)
     exit(MenuBarFrames.write(to: URL(fileURLWithPath: Config.expand(dir))))
 } else if args.contains("--snapshot") {
