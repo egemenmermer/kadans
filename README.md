@@ -5,8 +5,13 @@ rhythm a cyclist keeps.)
 
 <p align="center">
   <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/kadans-demo-on-dark.gif">
+    <img src="docs/images/kadans-demo.gif" width="320" alt="Kadans in light mode: the gauge, agents at work, a row dragged to the top, the brake, agents on another computer, and the phone pairing code">
+  </picture>
+  &nbsp;
+  <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/kadans-demo-dark.gif">
-    <img src="docs/images/kadans-demo.gif" width="400" alt="Kadans: the gauge, agents at work, a row dragged to the top, the brake, agents on another computer, and the phone pairing code">
+    <img src="docs/images/kadans-demo-dark-on-light.gif" width="320" alt="The same demo in dark mode">
   </picture>
   <br>
   <sub><a href="docs/images/kadans-demo.mp4">Watch the demo as a video (23 s)</a></sub>
