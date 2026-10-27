@@ -18,54 +18,61 @@
     version: 1, limits: 'auto', targets: { five_hour: 97, seven_day: 98 }, slack: 10, warmup: { minutes: 10, pct: 10 },
     notify: false, autopace: true, usageApi: true, lang: 'en', kickoff: { enabled: false, from: '07:00', to: '23:00' },
     compact: { soonPct: 40, nowPct: 60, idleMin: 5 }, own: 'aaaaaaaaaaaa', accounts: { aaaaaaaaaaaa: { gas: false } },
-    autoGas: false, autoGasMax: 1, autoGasMinRamGB: 2.5,
+    autoGas: false, autoGasMax: 1, autoGasMinRamGB: 2.5, codex: true, lean: true, phone: false, remoteAgents: true,
   };
   // k18: status --json usageApi (k13): read a minute ago.
   const usageApi = (o) => Object.assign({ enabled: true, lastOk: KF.N - KF.M, lastError: null, nextAt: null }, o);
   const twoAccounts = KF.status({ usageApi: usageApi(), accounts: [KF.acct(), KF.acct({ key: 'cccccccccccc', label: 'Other account', configDir: null, own: false })] });
   const openSettings = (doc) => doc.querySelector('[data-do="settings"]')?.click();
+  // k43: the rare settings sit on Settings › Advanced; scrollTo brings a group label to the top of the body.
+  const openAdvanced = (doc) => {
+    openSettings(doc);
+    doc.querySelector('[data-do="sub"][data-id="advanced"]')?.click();
+  };
+  const scrollTo = (doc, label) => {
+    const b = doc.getElementById?.('k-sbody');
+    const g = [...(doc.querySelectorAll?.('#k-sbody .gl') ?? [])].find((x) => x.textContent === label);
+    if (b && g) b.scrollTop += g.getBoundingClientRect().top - b.getBoundingClientRect().top - 4;
+  };
+  K.KF_SETTINGS = { openSettings, openAdvanced, scrollTo };
   K.KADANS_FIXTURES.settings = { status: twoAccounts, agents: KF.base(), config, install: install([]), after: openSettings };
   // k18: the usage row when Claude Code has no login, and after a failed read (backing off 8 min).
+  // k43: Settings › Advanced, from the top.
+  K.KADANS_FIXTURES.settings_advanced = { status: twoAccounts, agents: KF.base(), config, install: install([]), after: openAdvanced };
   K.KADANS_FIXTURES.settings_usage_login = { status: Object.assign({}, twoAccounts, { usageApi: usageApi({ lastOk: null, lastError: 'no_token' }) }),
-    agents: KF.base(), config, install: install([]), after: openSettings };
+    agents: KF.base(), config, install: install([]), after: openAdvanced };
   K.KADANS_FIXTURES.settings_usage_error = { status: Object.assign({}, twoAccounts, { usageApi: usageApi({ lastOk: KF.N - 30 * KF.M, lastError: 'http_503', nextAt: KF.N + 8 * KF.M }) }),
-    agents: KF.base(), config, install: install([]), after: openSettings };
-  // Settings scrolled to the end, with the Uninstall row open.
+    agents: KF.base(), config, install: install([]), after: openAdvanced };
+  // Settings › Advanced scrolled to the end, with the Uninstall row open.
   K.KADANS_FIXTURES.settings_end = {
     status: twoAccounts, agents: KF.base(), config, install: install([]),
     after: (doc) => {
-      openSettings(doc);
+      openAdvanced(doc);
       doc.querySelector('[data-do="uninstall"]')?.click();
       const b = doc.getElementById('k-sbody');
       if (b) b.scrollTop = b.scrollHeight;
     },
   };
-  // Settings scrolled to Auto-pace, Next window (off) and Accounts (own + other); Notifications is just below since k8.
+  // Settings › Advanced scrolled to Usage, On its own (spare quota off, kickoff off) and Agents.
   K.KADANS_FIXTURES.settings_mid = {
     status: twoAccounts, agents: KF.base(), config, install: install([]),
     after: (doc) => {
-      openSettings(doc);
-      const b = doc.getElementById('k-sbody');
-      const g = doc.querySelectorAll('#k-sbody .gl')[1];
-      if (b && g) b.scrollTop = g.offsetTop - b.offsetTop;
+      openAdvanced(doc);
+      scrollTo(doc, 'Usage');
     },
   };
-  // Kickoff on: the "Next window" group with its hours and the schedule command.
+  // Kickoff on: the "On its own" group with its hours and the schedule command.
   K.KADANS_FIXTURES.settings_kickoff = {
     status: twoAccounts, agents: KF.base(), config: { ...config, kickoff: { enabled: true, from: '07:00', to: '23:00' } }, install: install([]),
     after: (doc) => {
-      openSettings(doc);
-      const b = doc.getElementById('k-sbody');
-      const g = [...doc.querySelectorAll('#k-sbody .gl')].find((x) => x.textContent === 'Next window');
-      if (b && g) b.scrollTop = g.offsetTop - b.offsetTop;
+      openAdvanced(doc);
+      scrollTo(doc, 'On its own');
     },
   };
-  // k25: spare quota on, "Use spare quota on its own" on with 2 at a time; scrolled to Accounts.
+  // k25: spare quota on, "Use spare quota on its own" on with 2 at a time; Advanced scrolled to "On its own".
   const toAccounts = (doc) => {
-    openSettings(doc);
-    const b = doc.getElementById('k-sbody');
-    const g = [...doc.querySelectorAll('#k-sbody .gl')].find((x) => x.textContent === 'Accounts');
-    if (b && g) b.scrollTop = g.offsetTop - b.offsetTop;
+    openAdvanced(doc);
+    scrollTo(doc, 'On its own');
   };
   K.KADANS_FIXTURES.settings_autogas = {
     status: twoAccounts, agents: KF.base(), install: install([]), after: toAccounts,

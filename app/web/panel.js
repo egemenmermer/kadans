@@ -163,6 +163,8 @@
     // k27: phoneWant = a flipped Phone switch waiting for the app; pairTimer = the code countdown; tapKey = the row whose
     // actions a tap opened (touch screens have no hover).
     phoneWant: null, pairTimer: null, tapKey: null,
+    // k43: sub = the Settings second screen ('advanced' | 'phone' | 'computers' | null); updWant = a flipped updates switch.
+    sub: null, updWant: null,
     // k41: Settings › Computers: { open (the add form), adding (sent, waiting), removing (id), confirm (id), err (code) }.
     comp: { open: false, adding: false, removing: null, confirm: null, err: null, at: 0 },
     // k32: rename = the chat whose title is being edited { id, start }; titles = renames sent, shown until the data
@@ -1075,7 +1077,7 @@
     view.pairTimer = null;
     const p = phoneData();
     const exp = p?.pair?.expiresAt;
-    if (view.screen !== 'settings' || !p || !phoneOn(p) || !finite(exp) || exp <= Date.now() - 1000) return;
+    if (view.screen !== 'settings' || view.sub !== 'phone' || !p || !phoneOn(p) || !finite(exp) || exp <= Date.now() - 1000) return; // k43: Settings › Phone only
     view.pairTimer = setTimeout(() => { view.pairTimer = null; if (view.screen === 'settings') renderScreen(); }, 1000 - (Date.now() % 1000) || 1000);
   }
 
@@ -1224,23 +1226,95 @@
   }
 
   const topItem = (title) => ({ key: 'top', html: topBar(title) });
-  // A group: its label and its card, both keyed; items that come and go (kickoff hours, the uninstall command) rise in
-  // and fade out like rows.
+  // A group: its label (none on the first Settings screen) and its card, both keyed; items that come and go (kickoff
+  // hours, the uninstall command) rise in and fade out like rows.
   function sGroup(id, label, items) {
     const g = S('div', { class: 'sgrp' }, items, `g:${id}`, true);
     g.fade = true;
-    return [{ key: `gl:${id}`, html: `<div class="gl">${esc(label)}</div>` }, g];
+    return label ? [{ key: `gl:${id}`, html: `<div class="gl">${esc(label)}</div>` }, g] : [g];
   }
   const screenShell = (screen, cls, label, kids) =>
     S('div', { class: `panel screen${cls}`, role: 'dialog', 'aria-label': label }, kids, `screen:${screen}`, true);
 
+  // k43: Settings is short. The first screen holds what people change (pace, phone and computers, updates) and one
+  // Advanced row; the rare settings, Phone and Computers are second screens (view.sub) pushed from a one-line row. They
+  // stay inside the 'settings' screen, so the app keeps polling devices until the page goes back to the main panel.
+  const SUBS = { advanced: 'Advanced', phone: 'Phone', computers: 'Computers' };
+  const IC_NEXT = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>';
+  // A row that pushes a second screen: title, a short value and a chevron; the whole row is the button.
+  const navItem = (id, title, value = '') =>
+    S('button', { class: 'it nav', 'data-do': 'sub', 'data-id': id, 'data-key': `sub:${id}`, 'aria-label': value ? `${title}: ${value}` : title },
+      [`<span class="tx">${esc(title)}</span>`, value ? `<span class="val">${esc(value)}</span>` : '', `<span class="chev" aria-hidden="true">${IC_NEXT}</span>`], `sub:${id}`);
+  function phoneValue(p) {
+    if (!phoneOn(p)) return 'Off';
+    if (typeof p.error === 'string' && p.error) return 'Not working';
+    const n = Array.isArray(p.devices) ? p.devices.filter((x) => x && typeof x.id === 'string' && x.id).length : 0;
+    return n ? plural(n, 'phone', 'phones') : 'On';
+  }
+  function compValue(c) {
+    if (!Array.isArray(c.list)) return '';
+    const n = c.list.filter((x) => x && typeof x.id === 'string' && x.id && typeof x.name === 'string').length;
+    return n ? String(n) : 'None';
+  }
+
+  // k43: Updates (k44 builds the Mac side). The app pushes {update: {auto, available: <version> | null, checking}}; the
+  // page sends update-auto {on} and update-install. No payload, no row. A version is shown only when it looks like one.
+  const VER_RE = /^v?\d{1,4}(?:\.\d{1,4}){0,3}(?:[-+][0-9A-Za-z.]{1,24})?$/;
+  function updateData() {
+    const u = view.data?.update;
+    return u && typeof u === 'object' && !Array.isArray(u) ? u : null;
+  }
+  function updateItem(u) {
+    const w = view.updWant;
+    const auto = w && Date.now() - w.at < PENDING_MS ? w.on : u.auto === true;
+    const ver = typeof u.available === 'string' && VER_RE.test(u.available.trim()) ? u.available.trim() : null;
+    const sub = ver ? `<button class="pill blue inst" data-do="update-install" data-key="update-install">Install ${esc(ver)}</button>`
+      : u.checking === true ? '<div class="d">Checking…</div>' : '';
+    const sw = S('button', { class: 'sw', role: 'switch', 'aria-checked': String(auto), 'aria-label': 'Update automatically', 'data-do': 'update-auto',
+      'data-v': String(!auto), 'data-key': 'set:update-auto' });
+    return S('div', { class: 'it' }, [`<div class="tx"><div>Updates</div>${sub}</div>`, '<span class="cap" aria-hidden="true">Automatic</span>', sw], 'update');
+  }
+
   function settingsTree() {
     const d = view.data ?? {};
     const cfg = d.config && typeof d.config === 'object' ? d.config : null;
+    const sub = Object.hasOwn(SUBS, view.sub ?? '') ? view.sub : null;
+    const shell = (body) => screenShell(sub ? `settings:${sub}` : 'settings', '', sub ? `Kadans settings: ${SUBS[sub]}` : 'Kadans settings',
+      [topItem(sub ? SUBS[sub] : 'Settings'), S('div', { class: 'sbody', id: 'k-sbody' }, body, 'body', true)]);
     if (!cfg) {
-      return screenShell('settings', ' tall', 'Kadans settings', [topItem('Settings'), { key: 'loading', html: '<div class="sbody"><div class="card"><div class="msg"><div><div class="t">Loading settings…</div>' +
-        '<div class="s">If this stays, <span class="code">kadans config get</span> is failing.</div></div></div></div></div>' }]);
+      return shell([{ key: 'loading', html: '<div class="card"><div class="msg"><div><div class="t">Loading settings…</div>' +
+        '<div class="s">If this stays, <span class="code">kadans config get</span> is failing.</div></div></div></div>' }]);
     }
+    const ownKey = /^[0-9a-f]{12}$/.test(String(cfg.own ?? '')) ? cfg.own : null;
+    if (sub === 'advanced') return shell(advancedBody(d, cfg, ownKey));
+    if (sub === 'phone') {
+      const ph = phoneData();
+      return shell(ph && net.mode === 'bridge' ? sGroup('phone', '', phoneItems(ph)) : []);
+    }
+    if (sub === 'computers') {
+      const cp = compData();
+      return shell(cp && net.mode === 'bridge' ? sGroup('computers', '', compItems(cp)) : []); // k41: pairing stays on the Mac
+    }
+    const body = [];
+    body.push(...sGroup('pace', '', [
+      sSlider('targets.five_hour', '5-hour target', 'How full each 5-hour window should end.', 50, 100, '%'),
+      ownKey
+        ? sItem('gas', 'Use spare quota', 'Starts approved tasks before a window ends unused.', sSwitch(`accounts.${ownKey}.gas`, 'Use spare quota on your account'))
+        : null,
+      sItem('notify', 'Notifications', '', sSwitch('notify', 'Notifications')),
+    ].filter(Boolean)));
+    const ph = net.mode === 'bridge' ? phoneData() : null;
+    const cp = net.mode === 'bridge' ? compData() : null;
+    const dev = [ph ? navItem('phone', 'Phone', phoneValue(ph)) : null, cp ? navItem('computers', 'Computers', compValue(cp)) : null].filter(Boolean);
+    if (dev.length) body.push(...sGroup('devices', '', dev));
+    const up = net.mode === 'bridge' ? updateData() : null;
+    const n = hooksNeeded(d.install && typeof d.install === 'object' ? d.install : null);
+    body.push(...sGroup('more', '', [up ? updateItem(up) : null, navItem('advanced', 'Advanced', n ? 'Hooks to update' : '')].filter(Boolean)));
+    return shell(body);
+  }
+
+  // Settings › Advanced: everything a person sets once, if ever.
+  function advancedBody(d, cfg, ownKey) {
     const accounts = Array.isArray(d.status?.accounts) ? d.status.accounts : [];
     const own = accounts.find((a) => a?.own);
     const names = (own?.limits ?? []).map((l) => l?.name);
@@ -1248,85 +1322,64 @@
       : names.includes('five_hour') ? ' Today: 5‑hour only.' : names.includes('seven_day') ? ' Today: 7‑day only.' : '';
     const m = cfgVal('warmup.minutes');
     const p = cfgVal('warmup.pct');
-    const ownKey = /^[0-9a-f]{12}$/.test(String(cfg.own ?? '')) ? cfg.own : null;
-    const others = accounts.filter((a) => a && !a.own);
     const inst = d.install && typeof d.install === 'object' ? d.install : null;
     const n = hooksNeeded(inst);
     const cmd = typeof inst?.command === 'string' && inst.command ? inst.command : 'node bin/kadans.mjs';
+    const has = (k) => cfgVal(k) !== undefined;
     const body = [];
 
-    body.push(...sGroup('limits', 'Limits', [
-      usageItem(d),
-      sItem('windows', 'Windows to watch', '', sSeg('limits', 'Windows to watch', LIMIT_OPTS)),
-      { key: 'windows-sub', html: `<div class="d sub">Auto uses what Claude Code reports.${today}</div>` },
-      sSlider('targets.five_hour', '5-hour target', 'Aim to end the window this full.', 50, 100, '%'),
+    body.push(...sGroup('pace', 'Pace', [
+      S('div', { class: 'it col' }, [S('div', { class: 'lr c' }, ['<span>Windows to watch</span>', sSeg('limits', 'Windows to watch', LIMIT_OPTS)], 'lr'),
+        `<div class="d">Auto follows what Claude Code reports.${today}</div>`], 'windows'),
       sSlider('targets.seven_day', '7-day target', '', 50, 100, '%'),
       sSlider('slack', 'Spare margin', 'Spare quota counts only when the projection is this far below target.', 0, 30, ' pts'),
       sSlider('warmup.minutes', 'Warm-up time', '', 0, 60, ' min'),
       sSlider('warmup.pct', 'Warm-up usage', `No brake before ${esc(m ?? '?')} min into a window or ${esc(p ?? '?')}% used.`, 0, 50, '%'),
-    ].filter(Boolean)));
-
-    body.push(...sGroup('autopace', 'Auto-pace', [
-      sItem('autopace', 'Auto-pace', 'Nudges agents when usage runs hot and slows them if the brake holds 10 min. Same as the switch in the panel.',
-        sSwitch('autopace', 'Auto-pace')),
-      sItem('compact', 'Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()),
     ]));
 
+    body.push(...sGroup('usage', 'Usage', [
+      usageItem(d),
+      has('codex') ? sItem('codex', 'Show Codex limits', '', sSwitch('codex', 'Show Codex limits')) : null,
+    ].filter(Boolean)));
+
+    const auto = ownKey ? autoGasItems(ownKey) : [];
     const ko = cfg.kickoff && typeof cfg.kickoff === 'object' ? cfg.kickoff : null;
     if (ko) {
-      const koOn = cfgVal('kickoff.enabled') === 'true';
-      const items = [sItem('kickoff', 'Start the next window for me', 'When your 5-hour window has ended, Kadans sends Claude one tiny Haiku message, so the next ' +
-        'window starts right away. Your own account only; uses a little quota. Off until you turn it on.',
-      sSwitch('kickoff.enabled', 'Start the next window for me'))];
-      if (koOn) {
-        items.push(sHour('kickoff.from', 'Allowed from'), sHour('kickoff.to', 'Allowed until'), { key: 'kickoff-cmd',
+      auto.push(sItem('kickoff', 'Start the next window for me', 'Sends Claude one tiny message when a 5-hour window ends, so the next one starts at once. ' +
+        'Your account only; uses a little quota.', sSwitch('kickoff.enabled', 'Start the next window for me')));
+      if (cfgVal('kickoff.enabled') === 'true') {
+        auto.push(sHour('kickoff.from', 'Allowed from'), sHour('kickoff.to', 'Allowed until'), { key: 'kickoff-cmd',
           html: '<div class="it col un"><div class="d">Kadans does not set up background jobs itself. Run this once in a terminal; it adds a ' +
           'macOS job that checks every 15 minutes:</div>' +
           `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} kickoff schedule --apply</pre>` +
           `<div class="d">Without <span class="code">--apply</span> it only shows the job. To remove it: <span class="code">kickoff unschedule --apply</span>.</div></div>` });
       }
-      body.push(...sGroup('kickoff', 'Next window', items));
     }
+    if (auto.length) body.push(...sGroup('auto', 'On its own', auto));
 
-    body.push(...sGroup('accounts', 'Accounts', [
-      ownKey
-        ? sItem('gas', 'Use spare quota', 'Your account (<span class="code">~/.claude</span>). Starts approved tasks when quota would go unused. Off until you turn it on.',
-          sSwitch(`accounts.${ownKey}.gas`, 'Use spare quota on your account'))
-        : null,
-      ...(ownKey ? autoGasItems(ownKey) : []),
-      ...others.map((a, i) => sItem(`gas-other:${i}`, `Use spare quota · ${others.length > 1 ? `Other ${i + 1}` : 'Other account'}`,
-        '<span class="warn">Not available: Kadans never spends quota on an account that is not yours. Brake and pacing still work.</span>',
-        sSwitch('', 'Use spare quota on another account', true))),
+    body.push(...sGroup('agents', 'Agents', [
+      sItem('compact', 'Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()),
+      has('lean') ? sItem('lean', 'Lean mode', 'Short tips in your chats to use less quota.', sSwitch('lean', 'Lean mode')) : null,
+      has('remoteAgents') && net.mode === 'bridge'
+        ? sItem('remote', 'Agents on other computers', '', sSwitch('remoteAgents', 'Agents on other computers')) : null,
     ].filter(Boolean)));
 
-    body.push(...sGroup('notify', 'Notifications', [
-      sItem('notify', 'Allow notifications', "When you'd run out early, and when Kadans starts or finishes a task. Off by default.",
-        sSwitch('notify', 'Allow notifications')),
-    ]));
-
-    const ph = phoneData();
-    if (ph && net.mode === 'bridge') body.push(...sGroup('phone', 'Phone', phoneItems(ph)));
-    const cp = compData();
-    if (cp && net.mode === 'bridge') body.push(...sGroup('computers', 'Computers', compItems(cp))); // k41: pairing stays on the Mac
-
-    body.push(...sGroup('general', 'General', [
-      sItem('lang', 'Status line language', 'The line under Claude Code’s prompt.', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']])),
-    ]));
-
-    const cc = [
-      sItem('hooks', 'Hooks in Claude Code', inst ? (n ? `${plural(n, 'hook', 'hooks')} to add or update.` : 'Status line and hooks are installed.') : 'Not checked yet.',
-        n ? '<button class="pill blue" data-do="review" data-key="review">Review</button>' : inst ? '<span class="chip ok">Installed</span>' : ''),
-      sItem('uninstall', 'Remove from Claude Code', 'Takes out only Kadans hooks and restores your old status line.',
-        S('button', { class: 'pill danger', 'data-do': 'uninstall', 'data-key': 'uninstall', 'aria-expanded': String(view.uninstallOpen) }, ['Uninstall…'])),
-    ];
-    if (view.uninstallOpen) {
-      cc.push({ key: 'uninstall-cmd', html: '<div class="it col un"><div class="d">Kadans does not remove itself from here. Run this in a terminal; it saves a backup of ' +
-        'settings.json first, then takes out the status line and hooks and puts your old status line back:</div>' +
-        `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} uninstall --apply</pre>` +
-        `<div class="d">Without <span class="code">--apply</span> it only shows the change.</div></div>` });
+    const cc = [sItem('lang', 'Status line language', '', sSeg('lang', 'Status line language', [['en', 'English'], ['tr', 'Türkçe']]))];
+    if (net.mode === 'bridge') { // hooks are set up on the Mac, not from a phone
+      cc.push(
+        sItem('hooks', 'Hooks', inst ? (n ? `${plural(n, 'hook', 'hooks')} to add or update.` : '') : 'Not checked yet.',
+          n ? '<button class="pill blue" data-do="review" data-key="review">Review</button>' : inst ? '<span class="chip ok">Installed</span>' : ''),
+        sItem('uninstall', 'Remove from Claude Code', '',
+          S('button', { class: 'pill danger', 'data-do': 'uninstall', 'data-key': 'uninstall', 'aria-expanded': String(view.uninstallOpen) }, ['Uninstall…'])));
+      if (view.uninstallOpen) {
+        cc.push({ key: 'uninstall-cmd', html: '<div class="it col un"><div class="d">Kadans does not remove itself from here. Run this in a terminal; it saves a backup of ' +
+          'settings.json first, then takes out the status line and hooks and puts your old status line back:</div>' +
+          `<pre class="cmd" tabindex="0" aria-label="Command to run">${esc(cmd)} uninstall --apply</pre>` +
+          `<div class="d">Without <span class="code">--apply</span> it only shows the change.</div></div>` });
+      }
     }
-    if (net.mode === 'bridge') body.push(...sGroup('cc', 'Claude Code', cc)); // hooks are set up on the Mac, not from a phone
-    return screenShell('settings', ' tall', 'Kadans settings', [topItem('Settings'), S('div', { class: 'sbody', id: 'k-sbody' }, body, 'body', true)]);
+    body.push(...sGroup('cc', 'Claude Code', cc));
+    return body;
   }
 
   // Review: patched at block level (title bar, body, foot), so the confirm in the foot never rebuilds the list above it.
@@ -1391,9 +1444,10 @@
   function render(data) {
     const d = data && typeof data === 'object' ? data : {};
     const next = { ...(view.data ?? {}) };
-    for (const k of ['status', 'agents', 'config', 'install', 'phone', 'computers']) if (k in d) next[k] = d[k];
+    for (const k of ['status', 'agents', 'config', 'install', 'phone', 'computers', 'update']) if (k in d) next[k] = d[k];
     view.data = next;
     if ('phone' in d && view.phoneWant && (d.phone?.on === view.phoneWant.on || d.phone?.error)) view.phoneWant = null;
+    if ('update' in d && view.updWant && d.update?.auto === view.updWant.on) view.updWant = null;
     if ('config' in d) settlePending(d.config);
     if ('install' in d && view.applying) {
       view.applying = false;
@@ -1758,6 +1812,7 @@
     // k27/k28: the app polls `devices --json` only while Settings is open; tell it when the page leaves for the main panel.
     if (screen === 'main' && view.screen !== 'main' && net.mode === 'bridge') send({ action: 'settings-closed' });
     view.slide = motionOk() ? { dir, at: Date.now() } : null;
+    if (screen === 'main') view.sub = null; // Review keeps it: Back from Review lands on Advanced again
     view.screen = screen;
     view.sScroll = 0;
     view.applyConfirm = false;
@@ -1766,6 +1821,17 @@
     view.applied = false;
     if (net.mode === 'http') try { window.scrollTo?.(0, 0); } catch { /* the phone page scrolls, not the list */ }
     render({});
+  }
+
+  // k43: push (dir 'in') or leave (sub null, dir 'back') a Settings second screen; slides like a screen change.
+  function goSub(sub, dir = 'in') {
+    view.slide = motionOk() ? { dir, at: Date.now() } : null;
+    view.sub = sub;
+    view.sScroll = 0;
+    view.uninstallOpen = false;
+    if (sub !== 'computers') Object.assign(view.comp, { open: false, err: null, confirm: null });
+    if (net.mode === 'http') try { window.scrollTo?.(0, 0); } catch { /* the phone page scrolls, not the list */ }
+    renderScreen();
   }
 
   // Focus survives the 5 s re-render: rows carry data-key, buttons are keyed by action and id.
@@ -2542,8 +2608,13 @@
 
   // Settings / Review buttons. Returns true when handled.
   function onScreenClick(b) {
-    const back = (screen) => {
+    const back = (screen, sub) => {
       const land = () => {
+        if (sub) { // k43: a second screen goes back to the first Settings screen, focus on the row that opened it
+          goSub(null, 'back');
+          root().querySelector(`[data-do="sub"][data-id="${sub}"]`)?.focus();
+          return;
+        }
         go(screen, 'back');
         root().querySelector(screen === 'main' ? '[data-do="settings"]' : '[data-do="review"]')?.focus();
       };
@@ -2556,14 +2627,29 @@
       setTimeout(() => { view.leaving = false; land(); }, OUT_MS);
     };
     switch (b.dataset.do) {
-      case 'settings': go('settings'); send({ action: 'settings' }); root().querySelector('[data-do="back"]')?.focus(); return true;
+      case 'settings': view.sub = null; go('settings'); send({ action: 'settings' }); root().querySelector('[data-do="back"]')?.focus(); return true;
+      case 'sub':
+        if (view.screen === 'settings' && Object.hasOwn(SUBS, b.dataset.id ?? '')) {
+          goSub(b.dataset.id);
+          root().querySelector('[data-do="back"]')?.focus();
+        }
+        return true;
+      case 'update-auto':
+        view.updWant = { on: b.dataset.v === 'true', at: Date.now() };
+        send({ action: 'update-auto', on: view.updWant.on });
+        renderScreen();
+        return true;
+      case 'update-install': send({ action: 'update-install' }); return true;
       case 'review':
         view.from = view.screen;
         go('review');
         send({ action: 'install-preview' });
         root().querySelector('[data-do="apply"], [data-do="back"]')?.focus();
         return true;
-      case 'back': back(view.screen === 'review' ? view.from : 'main'); return true;
+      case 'back':
+        if (view.screen === 'settings' && view.sub) back('settings', view.sub);
+        else back(view.screen === 'review' ? view.from : 'main');
+        return true;
       case 'set': {
         const k = b.dataset.k;
         if (!k || b.dataset.v == null) return true;

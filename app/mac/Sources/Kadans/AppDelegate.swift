@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         panel.phone = phone
         panel.computers = Computers() // k41: Settings › Computers
+        panel.updater = AppUpdater.make() // k44: premium build with SUFeedURL + SUPublicEDKey only; nil otherwise
         // A plain SIGTERM would skip applicationWillTerminate and leave the serve child running: quit properly instead.
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

@@ -3,12 +3,11 @@
 (function (K) {
   const F = K.KADANS_FIXTURES;
   const S = F.settings;
+  // k43: Settings › Computers is its own screen, pushed from the one-line Computers row.
   const toComputers = (open) => (doc) => {
     S.after(doc);
+    doc.querySelector('[data-do="sub"][data-id="computers"]')?.click();
     if (open) doc.querySelector?.('[data-do="comp-open"]')?.click?.();
-    const b = doc.getElementById?.('k-sbody');
-    const g = [...(doc.querySelectorAll?.('.gl') ?? [])].find((x) => x.textContent === 'Computers');
-    if (b && g) b.scrollTop += g.getBoundingClientRect().top - b.getBoundingClientRect().top - 4;
   };
   const list = [
     { id: 'env-0001', name: 'kasa', status: 'online', agents: 2 },

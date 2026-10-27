@@ -8,11 +8,10 @@
   const phone = (o) => Object.assign({ on: true, url: URL, pair: null, devices: [], error: null }, o);
   // Settings is opened at the real clock, so the pair expiry is read at render time (Date.now()).
   const pairNow = () => ({ url: `${URL}#pair=ABCDEFGHIJKLMNOPQRSTUVWXYZ`, qr: QR, expiresAt: Date.now() + (9 * 60 + 41) * 1000 });
+  // k43: Settings › Phone is its own screen, pushed from the one-line Phone row.
   const toPhone = (doc) => {
     S.after(doc);
-    const b = doc.getElementById?.('k-sbody');
-    const g = [...(doc.querySelectorAll?.('.gl') ?? [])].find((x) => x.textContent === 'Phone');
-    if (b && g) b.scrollTop += g.getBoundingClientRect().top - b.getBoundingClientRect().top - 4;
+    doc.querySelector('[data-do="sub"][data-id="phone"]')?.click();
   };
   const base = { status: S.status, agents: S.agents, config: S.config, install: S.install, after: toPhone };
   const devices = [{ id: 'd1', name: 'iPhone', lastSeenAt: Date.now() - 3 * KF.M }, { id: 'd2', name: 'iPad', lastSeenAt: null }];

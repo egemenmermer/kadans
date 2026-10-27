@@ -73,6 +73,7 @@
       accounts: { aaaaaaaaaaaa: { gas: false } } },
     after: (doc) => {
       doc.querySelector('[data-do="settings"]')?.click();
+      doc.querySelector('[data-do="sub"][data-id="advanced"]')?.click(); // k43: Uninstall is on Settings › Advanced
       doc.querySelector('[data-do="uninstall"]')?.click();
     },
   };

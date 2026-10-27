@@ -1,3 +1,5 @@
 build/
 app/mac/.build/
 dist/
+app/mac/.build-sparkle/
+app/mac/Package.resolved

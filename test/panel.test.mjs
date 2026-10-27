@@ -517,6 +517,7 @@ test('panel: Suggest compact Off hides every hint and button; the segment sets c
   assert.doesNotMatch(p.html(), /Compact this chat\?/);
   // Settings: Off is pressed and can be picked (the CLI stores 101 since k12)
   p.tap({ do: 'settings' });
+  p.tap({ do: 'sub', id: 'advanced' }); // k43: Suggest compact is on Settings › Advanced
   html = p.html();
   assert.match(html, /aria-label="Suggest compact"/);
   assert.match(html, /<button aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="101" [^>]*>Off<\/button>/);
@@ -525,6 +526,7 @@ test('panel: Suggest compact Off hides every hint and button; the segment sets c
   p.window.kadans.reset();
   p.window.kadans.render(F.compact);
   p.tap({ do: 'settings' });
+  p.tap({ do: 'sub', id: 'advanced' }); // k43: Suggest compact is on Settings › Advanced
   html = p.html();
   assert.match(html, /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="40"/);
   p.tap({ do: 'set', k: 'compact.soonPct', v: '60' });
@@ -540,11 +542,13 @@ test('panel: picking Off sends config-set compact.soonPct 101, and the hints go 
   p.window.kadans.reset();
   p.window.kadans.render(F.compact);
   p.tap({ do: 'settings' });
+  p.tap({ do: 'sub', id: 'advanced' }); // k43: Suggest compact is on Settings › Advanced
   assert.match(p.html(), /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="40"/);
   p.tap({ do: 'set', k: 'compact.soonPct', v: '101' });
   assert.deepEqual(JSON.parse(JSON.stringify(p.sent.filter((m) => m.action === 'config-set'))), [{ action: 'config-set', key: 'compact.soonPct', value: '101' }]);
   assert.match(p.html(), /aria-pressed="true" data-do="set" data-k="compact.soonPct" data-v="101"[^>]*>Off</);
   p.window.kadans.render({ config: { ...F.compact.config, compact: { ...F.compact.config.compact, soonPct: 101 } } });
+  p.tap({ do: 'back' });
   p.tap({ do: 'back' });
   assert.doesNotMatch(p.html(), /class="tag"|data-do="compact"/);
 });
@@ -866,23 +870,23 @@ test('panel: a Settings switch patches only itself (the knob node stays, so it s
   const p = loadPanel();
   const F = p.window.KADANS_FIXTURES;
   p.window.kadans.reset();
-  p.window.kadans.render(F.settings);
-  F.settings.after(p.document);
-  const sw = p.el.find('set:notify');
+  p.window.kadans.render(F.settings_advanced); // k43: a switch, a segment and the usage line on Settings › Advanced
+  F.settings_advanced.after(p.document);
+  const sw = p.el.find('set:lean');
   const usage = p.el.find('set:usageApi');
   const seg = p.el.find('set:lang:en');
-  assert.equal(sw.getAttribute('aria-checked'), 'false');
-  p.log.length = 0;
-  p.tap({ do: 'set', k: 'notify', v: 'true' });
-  assert.ok(p.log.length > 0);
-  for (const [op, key] of p.log) assert.deepEqual([op, key], ['attr', 'set:notify']);
-  assert.equal(p.el.find('set:notify'), sw);
   assert.equal(sw.getAttribute('aria-checked'), 'true');
-  assert.equal(sw.getAttribute('data-v'), 'false');
-  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'notify', value: 'true' });
+  p.log.length = 0;
+  p.tap({ do: 'set', k: 'lean', v: 'false' });
+  assert.ok(p.log.length > 0);
+  for (const [op, key] of p.log) assert.deepEqual([op, key], ['attr', 'set:lean']);
+  assert.equal(p.el.find('set:lean'), sw);
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.equal(sw.getAttribute('data-v'), 'true');
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'config-set', key: 'lean', value: 'false' });
   // the config that confirms it changes nothing more
   p.log.length = 0;
-  p.window.kadans.render({ config: { ...F.settings.config, notify: true } });
+  p.window.kadans.render({ config: { ...F.settings.config, lean: false } });
   assert.deepEqual(p.log, []);
   // a segment: only its two buttons change
   p.tap({ do: 'set', k: 'lang', v: 'tr' });
@@ -893,7 +897,7 @@ test('panel: a Settings switch patches only itself (the knob node stays, so it s
   p.log.length = 0;
   p.window.kadans.render({ status: { ...F.settings.status, now: F.settings.status.now + 4 * 60_000 } });
   assert.equal(p.el.find('set:usageApi'), usage);
-  assert.equal(p.el.find('set:notify'), sw);
+  assert.equal(p.el.find('set:lean'), sw);
   assert.ok(p.log.length > 0 && p.log.every(([op]) => op === 'replace' || op === 'insert'));
   assert.match(p.html(), /Every 2 min · last read 5 min ago/);
 });
@@ -937,9 +941,9 @@ test('panel: Settings "Read usage from Claude" shows fixed strings only (ok, log
     return m[1].replace(/&#39;/g, "'");
   };
   const ua = (f, o) => ({ status: { ...f.status, usageApi: { ...f.status.usageApi, ...o } } });
-  assert.equal(open('settings'), 'Every 2 min · last read 1 min ago');
-  assert.equal(open('settings', (f) => ua(f, { lastOk: N - 20_000 })), 'Every 2 min · last read just now');
-  assert.equal(open('settings', (f) => ua(f, { lastOk: null })), 'Every 2 min · not read yet');
+  assert.equal(open('settings_advanced'), 'Every 2 min · last read 1 min ago');
+  assert.equal(open('settings_advanced', (f) => ua(f, { lastOk: N - 20_000 })), 'Every 2 min · last read just now');
+  assert.equal(open('settings_advanced', (f) => ua(f, { lastOk: null })), 'Every 2 min · not read yet');
   assert.equal(open('settings_usage_login'), 'Needs a Claude Code login');
   const at = new Date(N + 8 * M);
   const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
@@ -947,7 +951,7 @@ test('panel: Settings "Read usage from Claude" shows fixed strings only (ok, log
   assert.equal(open('settings_usage_error', (f) => ua(f, { nextAt: null })), "Couldn't read · trying again soon");
   // an error string from the CLI is never shown, whatever it holds
   const evil = '<img src=x onerror=alert(1)> /Users/me token';
-  const html = (() => { open('settings', (f) => ua(f, { lastError: evil })); return p.html(); })();
+  const html = (() => { open('settings_advanced', (f) => ua(f, { lastError: evil })); return p.html(); })();
   assert.ok(!html.includes('onerror') && !html.includes('token') && !html.includes('/Users/me'));
   assert.match(html, /Couldn&#39;t read · trying again soon/);
   // off: no error line, whatever the last error was
@@ -1061,8 +1065,8 @@ test('panel: Settings Back reports the main screen\'s height as its slide-in sta
   const clock = { now: 5_000_000 };
   const timers = [];
   const rect = FNode.prototype.getBoundingClientRect;
-  // the Settings screen is tall (560), the main panel 400
-  FNode.prototype.getBoundingClientRect = function () { return { height: / tall/.test(this.attrs.get('class') ?? '') ? 560 : 400 }; };
+  // the Settings screen is taller (560 here; since k43 it is as tall as its rows), the main panel 400
+  FNode.prototype.getBoundingClientRect = function () { return { height: / screen/.test(this.attrs.get('class') ?? '') ? 560 : 400 }; };
   try {
     const p = loadPanel({ clock, timers });
     const F = p.window.KADANS_FIXTURES;
@@ -1379,7 +1383,7 @@ test('Settings › Phone: off, on with devices, pairing with QR and countdown, e
   assert.ok(!open('settings').includes('Use Kadans on your phone'));
   // off
   let h = open('settings_phone_off');
-  assert.match(h, /<div class="gl">Phone<\/div>/);
+  assert.match(h, /<span class="ttl">Phone<\/span>/); // k43: its own screen, pushed from the Phone row
   assert.match(h, /Use Kadans on your phone/);
   assert.match(h, /On your Wi-Fi the link is not encrypted; turn on Tailscale to use it away from home or on shared Wi-Fi/);
   assert.equal(p.el.find('set:phone').getAttribute('aria-checked'), 'false');
@@ -1427,7 +1431,10 @@ test('Settings › Phone: off, on with devices, pairing with QR and countdown, e
   assert.ok(!h.includes('<img'));
   assertNoInjection(h.replace(/<img class="qr"[^>]*>/g, ''), 'phone');
   assert.ok(h.includes('&lt;img src=x onerror=alert(1)&gt;'));
-  // leaving Settings tells the app (it stops polling devices)
+  // leaving Settings tells the app (it stops polling devices); Back from Phone lands on Settings first, which does not
+  p.tap({ do: 'back' });
+  assert.notEqual(p.sent.at(-1)?.action, 'settings-closed');
+  assert.match(p.html(), /<span class="ttl">Settings<\/span>/);
   p.tap({ do: 'back' });
   assert.deepEqual({ ...p.sent.at(-1) }, { action: 'settings-closed' });
 });
@@ -1440,10 +1447,13 @@ test('phone: Settings on the phone has no Phone or Claude Code group (Mac-only),
   await flush();
   p.tap({ do: 'settings' });
   const h = p.html();
-  assert.match(h, /Auto-pace/);
-  assert.ok(!h.includes('Use Kadans on your phone'));
-  assert.ok(!h.includes('Remove from Claude Code'));
+  assert.match(h, /5-hour target/);
+  assert.ok(!h.includes('data-id="phone"') && !h.includes('data-id="computers"'));
+  p.tap({ do: 'sub', id: 'advanced' });
+  assert.match(p.html(), /Status line language/);
+  assert.ok(!p.html().includes('Remove from Claude Code'));
   const n = srv.calls.length;
+  p.tap({ do: 'back' });
   p.tap({ do: 'back' });
   await flush();
   assert.ok(srv.calls.slice(n).every((c) => c.path === 'api/state'));
@@ -1878,12 +1888,13 @@ test('Settings › Computers: rows with status and agents, offline muted, remove
   };
   assert.ok(!open('settings').includes('Add a computer'), 'an older app sends no computers: no section');
   let h = open('settings_computers');
-  assert.match(h, /<div class="gl">Computers<\/div>/);
+  assert.match(h, /<span class="ttl">Computers<\/span>/); // k43: its own screen, pushed from the Computers row
   assert.match(h, /<div>kasa<\/div><div class="d">online · 2 agents<\/div>/);
   assert.match(h, /<div>studio<\/div><div class="d">not live · 1 agent<\/div>/);
   assert.match(h, /<div class="it off"><div class="tx"><div>PC<\/div><div class="d">offline<\/div>/);
   assert.match(h, /Add a computer/);
-  assert.ok(h.indexOf('>Computers<') > h.indexOf('>Notifications<'), 'below the other Mac-only groups');
+  assert.ok(open('settings_update').indexOf('>Computers<') > p.html().indexOf('>Phone<'), 'its row sits under the Phone row');
+  h = open('settings_computers');
   p.tap({ do: 'comp-remove', id: 'env-0003' });
   h = p.html();
   assert.match(h, /Unpair it from this Mac\?/);
@@ -2080,4 +2091,189 @@ test('k42: the prompt title is kept in page memory only: cached runs keep it, a 
   p.window.kadans.render(d);
   assert.equal(name(), 'Session in Fernway');
   assert.ok(!JSON.stringify(p.sent).includes('rain sound'), 'never sent to the host');
+});
+
+// ---------- k43: calm Settings (first screen, Advanced, Phone / Computers screens, Updates) ----------
+const ttl = (html) => /<span class="ttl">([^<]*)<\/span>/.exec(html)?.[1] ?? null;
+const groups = (html) => (html.match(/class="sgrp"/g) ?? []).length;
+
+test('k43: the first Settings screen has at most 3 groups and none of the rare settings', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  for (const name of ['settings', 'settings_update', 'settings_update_auto', 'settings_update_checking']) {
+    p.window.kadans.reset();
+    p.window.kadans.render(F[name]);
+    F[name].after(p.document);
+    const h = p.html();
+    assert.equal(ttl(h), 'Settings', name);
+    assert.ok(groups(h) >= 2 && groups(h) <= 3, `${name}: ${groups(h)} groups`);
+    for (const rare of ['Status line language', 'Read usage from Claude', 'Suggest compact', 'Start the next window', 'Warm-up', '7-day target',
+      'Windows to watch', 'Spare margin', 'Remove from Claude Code', 'Hooks', 'on its own', 'Lean mode', 'Use Kadans on your phone', 'Add a computer']) {
+      assert.ok(!h.includes(rare), `${name}: "${rare}" is not on the first screen`);
+    }
+    assert.ok(!/data-k="autopace"/.test(h), 'Auto-pace is the bottom bar switch only (no duplicate)');
+    assert.match(h, /data-do="sub" data-id="advanced"/);
+  }
+  // the fullest first screen: pace, then Phone and Computers as one line each, then Updates and Advanced
+  p.window.kadans.reset();
+  p.window.kadans.render(F.settings_update);
+  F.settings_update.after(p.document);
+  const h = p.html();
+  assert.equal(groups(h), 3);
+  assert.match(h, /aria-label="Phone: 1 phone"/);
+  assert.match(h, /aria-label="Computers: 2"/);
+  assert.ok(h.indexOf('>5-hour target<') < h.indexOf('>Phone<') && h.indexOf('>Phone<') < h.indexOf('>Computers<') &&
+    h.indexOf('>Computers<') < h.indexOf('>Updates<') && h.indexOf('>Updates<') < h.indexOf('>Advanced<'));
+});
+
+test('k43: Advanced, Phone and Computers push a second screen and Back returns to Settings, then to the panel', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  p.window.kadans.reset();
+  p.window.kadans.render({ ...F.settings_update, install: F.hooks.install });
+  p.tap({ do: 'sub', id: 'advanced' }); // not on Settings: nothing happens, nothing is sent
+  assert.equal(ttl(p.html()), null);
+  p.tap({ do: 'settings' });
+  assert.match(p.html(), /aria-label="Advanced: Hooks to update"/);
+  const sent = p.sent.length;
+  for (const [id, title] of [['advanced', 'Advanced'], ['phone', 'Phone'], ['computers', 'Computers']]) {
+    p.tap({ do: 'sub', id });
+    assert.equal(ttl(p.html()), title);
+    assert.match(p.html(), new RegExp(`aria-label="Kadans settings: ${title}"`));
+    p.tap({ do: 'back' });
+    assert.equal(ttl(p.html()), 'Settings', `Back from ${title}`);
+  }
+  p.tap({ do: 'sub', id: 'nope' });
+  p.tap({ do: 'sub', id: '__proto__' });
+  assert.equal(ttl(p.html()), 'Settings');
+  assert.equal(p.sent.length, sent, 'moving between Settings screens sends nothing to the app');
+  // Review opened from Advanced comes back to Advanced; the gear always opens the first screen
+  p.tap({ do: 'sub', id: 'advanced' });
+  p.tap({ do: 'review' });
+  assert.equal(ttl(p.html()), 'Update hooks');
+  p.tap({ do: 'back' });
+  assert.equal(ttl(p.html()), 'Advanced');
+  p.tap({ do: 'back' });
+  p.tap({ do: 'back' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'settings-closed' });
+  assert.equal(ttl(p.html()), null, 'the main panel');
+  p.tap({ do: 'settings' });
+  p.tap({ do: 'sub', id: 'phone' });
+  p.tap({ do: 'back' });
+  p.tap({ do: 'back' });
+  p.tap({ do: 'settings' });
+  assert.equal(ttl(p.html()), 'Settings');
+});
+
+test('k43: Back from a second screen slides out, then Settings slides back in and reports its height at once', () => {
+  const clock = { now: 5_000_000 };
+  const timers = [];
+  const rect = FNode.prototype.getBoundingClientRect;
+  FNode.prototype.getBoundingClientRect = function () { return { height: /settings: Advanced/.test(this.attrs.get('aria-label') ?? '') ? 560 : 420 }; };
+  try {
+    const p = loadPanel({ clock, timers });
+    const F = p.window.KADANS_FIXTURES;
+    p.window.kadans.reset();
+    p.window.kadans.render({ ...F.settings, after: undefined });
+    p.tap({ do: 'settings' });
+    const sizes = () => p.sent.filter((m) => m.action === 'size').map((m) => m.height);
+    const at = sizes().length;
+    clock.now += 2000;
+    timers.forEach((t) => { t.ran = true; });
+    p.tap({ do: 'sub', id: 'advanced' });
+    assert.equal(ttl(p.html()), 'Advanced');
+    assert.deepEqual(sizes().slice(at), [560], 'taller at once, with the push');
+    clock.now += 2000;
+    timers.forEach((t) => { t.ran = true; });
+    p.tap({ do: 'back' });
+    assert.equal(ttl(p.html()), 'Advanced', 'still sliding out');
+    const out = pending(timers).find((t) => t.ms === 130);
+    assert.ok(out, 'Back waits for the slide-out');
+    clock.now += 130;
+    fire(out);
+    assert.equal(ttl(p.html()), 'Settings');
+    assert.deepEqual(sizes().slice(at), [560, 420], 'the shorter height goes out as the slide-in starts');
+  } finally {
+    FNode.prototype.getBoundingClientRect = rect;
+  }
+});
+
+test('k43: every control the old Settings had is still reachable (Settings, its second screens, or the bottom bar)', () => {
+  // Listed from the Settings screen before k43 (one long page): data-do, with data-k / data-set for config keys.
+  const OLD = ['back', 'review', 'uninstall', 'phone-on', 'phone-off', 'phone-pair', 'phone-revoke', 'comp-open', 'comp-close', 'comp-add',
+    'comp-remove', 'comp-keep', 'comp-remove-go', 'set:limits', 'set:usageApi', 'set:autopace', 'set:compact.soonPct', 'set:kickoff.enabled',
+    'set:accounts.aaaaaaaaaaaa.gas', 'set:autoGas', 'set:autoGasMax', 'set:notify', 'set:lang', 'range:targets.five_hour',
+    'range:targets.seven_day', 'range:slack', 'range:warmup.minutes', 'range:warmup.pct', 'range:kickoff.from', 'range:kickoff.to'];
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const seen = new Set();
+  const collect = () => {
+    const h = p.html();
+    for (const m of h.matchAll(/data-do="([^"]+)"(?: data-k="([^"]+)")?/g)) seen.add(m[1] === 'set' ? `set:${m[2]}` : m[1]);
+    for (const m of h.matchAll(/data-set="([^"]+)"/g)) seen.add(`range:${m[1]}`);
+  };
+  const open = (name, ...taps) => {
+    p.window.kadans.reset();
+    p.window.kadans.render(F[name]);
+    F[name].after?.(p.document);
+    collect();
+    for (const t of taps) { p.tap(t); collect(); }
+  };
+  open('settings_update'); // the first screen
+  p.window.kadans.reset();
+  p.window.kadans.render({ ...F.settings, status: { ...F.settings.status, autopace: true } });
+  collect();
+  assert.ok(seen.has('autopace'), 'the bottom bar Auto-pace switch');
+  seen.add('set:autopace'); // the same setting: the bottom bar sends autopace, the bridge maps it to config-set autopace
+  open('settings_kickoff');
+  open('settings_autogas');
+  open('settings_end');
+  open('hooks', { do: 'settings' }, { do: 'sub', id: 'advanced' });
+  open('settings_phone_off');
+  open('settings_phone_on');
+  open('settings_computers', { do: 'comp-remove', id: 'env-0001' });
+  open('settings_computers_add');
+  const missing = OLD.filter((k) => !seen.has(k));
+  assert.deepEqual(missing, []);
+});
+
+test('k43: the Updates row shows only with an update payload; Automatic and Install send their actions', () => {
+  const p = loadPanel();
+  const F = p.window.KADANS_FIXTURES;
+  const open = (f) => {
+    p.window.kadans.reset();
+    p.window.kadans.render(f);
+    F.settings.after(p.document);
+    return p.html();
+  };
+  let h = open(F.settings);
+  assert.ok(!h.includes('>Updates<') && !h.includes('update-auto') && !h.includes('update-install'), 'no payload, no row');
+  h = open(F.settings_update);
+  assert.match(h, /<div>Updates<\/div><button class="pill blue inst" data-do="update-install" data-key="update-install">Install 1\.2\.0<\/button>/);
+  assert.match(h, /<span class="cap" aria-hidden="true">Automatic<\/span>/);
+  const sw = p.el.find('set:update-auto');
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  p.tap({ do: 'update-auto', v: sw.getAttribute('data-v') });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'update-auto', on: true });
+  assert.equal(p.el.find('set:update-auto'), sw, 'the switch keeps its node');
+  assert.equal(sw.getAttribute('aria-checked'), 'true', 'and flips at once');
+  p.window.kadans.render({ update: { auto: true, available: '1.2.0', checking: false } });
+  assert.equal(sw.getAttribute('aria-checked'), 'true');
+  p.tap({ do: 'update-install' });
+  assert.deepEqual({ ...p.sent.at(-1) }, { action: 'update-install' });
+  // nothing waiting: no button; checking: one quiet line
+  h = open(F.settings_update_auto);
+  assert.ok(h.includes('>Updates<') && !h.includes('update-install') && !h.includes('Checking'));
+  assert.equal(p.el.find('set:update-auto').getAttribute('aria-checked'), 'true');
+  assert.match(open(F.settings_update_checking), /<div>Updates<\/div><div class="d">Checking…<\/div>/);
+  // a version that does not look like one is never drawn
+  for (const bad of ['<img src=x onerror=alert(1)>', '1.2.0 now', 'x'.repeat(80), 7]) {
+    h = open({ ...F.settings_update, update: { auto: false, available: bad, checking: false } });
+    assertNoInjection(h, 'update');
+    assert.ok(!h.includes('update-install') && !h.includes('onerror'), String(bad));
+  }
+  assert.match(open({ ...F.settings_update, update: { auto: false, available: 'v1.10.2-beta.1', checking: false } }), />Install v1\.10\.2-beta\.1</);
+  // the payload going away removes the row
+  p.window.kadans.render({ update: null });
+  assert.ok(!p.html().includes('>Updates<'));
 });

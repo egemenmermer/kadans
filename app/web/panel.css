@@ -435,3 +435,17 @@ html[data-shell="phone"] .seg button { min-height: 32px; padding: 0 10px; }
 .fld:focus-visible, .fld:focus { box-shadow: var(--focus); border-color: transparent; }
 .cfoot { display: flex; justify-content: flex-end; align-items: center; gap: 6px; min-height: 26px; }
 html[data-shell="phone"] .fld { height: 40px; font-size: 16px; }
+/* k43: calm Settings. Unlabelled groups on the first screen sit apart; a row that pushes a second screen is one button
+   (title, quiet value, chevron); the Updates row's "Automatic" caption and its Install button. */
+.sgrp + .sgrp { margin-top: 12px; }
+.it.nav { width: 100%; text-align: left; border-radius: 0; transition: opacity .12s ease-out; }
+.it.nav:active { opacity: .55; }
+.it.nav:focus-visible { border-radius: 8px; }
+.it.nav .tx { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.it.nav .val { color: var(--label2); white-space: nowrap; flex: none; }
+.it.nav .chev { display: flex; flex: none; color: var(--label3); margin-left: -4px; }
+.it.nav .chev svg { width: 14px; height: 14px; }
+.it .cap { font-size: 12px; color: var(--label2); flex: none; margin-right: -2px; }
+.it .tx .pill.inst { margin-top: 6px; }
+.it.col .lr.c { align-items: center; }
+html[data-shell="phone"] .it.nav .val { font-size: 15px; }

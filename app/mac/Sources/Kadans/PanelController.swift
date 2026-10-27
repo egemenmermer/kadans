@@ -95,6 +95,11 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     }
     /// k41: the owner's other computers (Settings › Computers). nil in snapshot mode: the computers actions are ignored.
     var computers: Computers?
+    /// k44: Sparkle updater of the signed premium build; nil in the free build and in snapshot mode (no `update` payload,
+    /// update actions ignored).
+    var updater: AppUpdater? {
+        didSet { updater?.onChange = { [weak self] in self?.pushUpdate() } }
+    }
     /// k28: the page sent "settings" and the popover has not closed since. The page sends no "back" notice, so this
     /// stays true until the popover closes. While true, every refresh carries {phone} (and `devices --json` while on).
     private(set) var settingsOpen = false
@@ -280,6 +285,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 payload.merge(extra) { _, new in new }
                 if wantDevices { self.phone?.noteDevices(devices) }
                 if withPhone, let ph = self.phone { payload.merge(ph.payload()) { _, new in new } }
+                if full, let up = self.updater { payload.merge(up.payload()) { _, new in new } }
                 self.push(payload)
                 completion?()
                 if self.wantFull {
@@ -357,6 +363,13 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     /// The serve child started or died: the page hears it only while Settings is open (the next refresh carries it anyway).
     private func phoneChanged() {
         if settingsOpen { pushPhone() }
+    }
+
+    // MARK: updates (k44)
+
+    func pushUpdate() {
+        guard loaded, !fixtureOnly, let p = updater?.payload(), !p.isEmpty else { return }
+        push(p)
     }
 
     // MARK: computers (k41)
@@ -580,6 +593,18 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 self?.computersDone("computers-remove", id: id, ok: ok)
                 if ok { self?.refresh() }
             }
+        // k44: updates (premium build only). Nothing from the page reaches Sparkle but one boolean.
+        case "update-auto":
+            guard let updater else { log("ignored update-auto: no updater in this build"); return }
+            guard let n = body["on"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else {
+                log("ignored update-auto: on is not a boolean")
+                return
+            }
+            updater.setAuto(n.boolValue)
+        case "update-install":
+            guard let updater else { log("ignored update-install: no updater in this build"); return }
+            onClose?()
+            updater.checkNow()
         default:
             log("ignored action \"\(action)\" (not on the allow-list)")
         }
