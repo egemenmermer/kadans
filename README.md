@@ -5,7 +5,12 @@ A speedometer for your Claude Code usage limits, in the macOS menu bar.
 Kadans shows how fast you use your Claude limit, where you will land at the reset, and what each agent is doing.
 You can slow, pause, compact, replace or stop an agent with one click. It runs on your Mac and is free and open source (MIT).
 
-![The Kadans panel while the brake is on](docs/images/panel-brake.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-brake-dark.png">
+    <img src="docs/images/panel-brake.png" width="320" alt="The Kadans panel while the brake is on">
+  </picture>
+</p>
 
 ## Requirements
 
@@ -101,9 +106,11 @@ follows the light and dark look of macOS.
   paused yourself.
 - **Menu bar item.** The face blinks now and then and moves while an agent works.
 
-![Pacing one agent](docs/images/panel-pace-menu.png)
-
-![Replacing an agent with a queued task](docs/images/panel-replace.png)
+<p align="center">
+  <img src="docs/images/panel-pace-menu.png" width="280" alt="Pacing one agent">
+  &nbsp;
+  <img src="docs/images/panel-replace.png" width="280" alt="Replacing an agent with a queued task">
+</p>
 
 ### Brake and throttle
 

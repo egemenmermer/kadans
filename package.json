@@ -1,6 +1,6 @@
 {
   "name": "kadans",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Pace Claude Code usage limits: a speedometer for the 5-hour and 7-day windows, in the macOS menu bar",
   "license": "MIT",

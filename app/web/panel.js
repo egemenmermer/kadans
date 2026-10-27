@@ -679,8 +679,8 @@
         const note = 'Kadans saw no smaller context within 90 s. If it did not compact, type /compact in that chat.';
         [pre, preText] = [`<span class="warn" title="${esc(note)}">Compact not confirmed</span> · `, `Compact not confirmed: ${note} `];
       }
-      // The number is the current context ("124k ctx"); the lifetime sum moves to the tooltip. 'now' adds a quiet tag.
-      const ctx = finite(a.context?.tokens) ? `${tokens(a.context.tokens)} ctx` : null;
+      // The number is the current context ("124k context"); the lifetime sum moves to the tooltip. 'now' adds a quiet tag.
+      const ctx = finite(a.context?.tokens) ? `${tokens(a.context.tokens)} context` : null;
       const quiet = swap || ask || (rs && !rs.ok);
       const tagOn = ctx && !cs && !quiet && !askC && adviceOf(a) === 'now';
       const tagTip = tagOn ? `${why || 'Big context'}${canCompact(a) ? '' : `. ${TYPE_IT}`}` : '';
@@ -1757,6 +1757,11 @@
   // NSPopover): closed, the blink timer stops and nothing animates.
   function visible(on) {
     view.shown = on !== false;
+    // Opening or closing the popover drops focus: a row focused earlier (a click, or a restore after a refresh) would
+    // otherwise come back highlighted, ring and actions showing, the next time the popover opens.
+    const a = document.activeElement;
+    if (a && a !== document.body && typeof a.blur === 'function') a.blur();
+    view.focusKey = null;
     scheduleBlinks();
   }
   window.kadans = { version: 1, render, send, result: actionResult, reset, assignShapes, frames, visible, patchStats, blinkState, staleReading };

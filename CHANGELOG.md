@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (date: TODO)
+## 1.0.0 (2026-10-27)
 
 First public release. Changes since 0.1.0:
 

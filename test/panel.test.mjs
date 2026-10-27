@@ -315,22 +315,22 @@ test('panel: context number and compact hint for none / soon / now / null', () =
   const html = p.html();
   // none (working): the number, no tag; the lifetime sum only in the tooltip
   const none = rowHtml(html, 'fx-0024');
-  assert.match(none, /Quarry · Opus · 148k ctx · 40 min/);
+  assert.match(none, /Quarry · Opus · 148k context · 40 min/);
   assert.doesNotMatch(none, /class="tag"/);
   assert.doesNotMatch(none, /class="pv">[^<]*2\.1M/);
   assert.match(none, /title="Port the CSV importer\n2\.1M tokens since start, cache reads not counted"/);
   // null: no number in that slot
   const nul = rowHtml(html, 'fx-0025');
-  assert.doesNotMatch(nul, /ctx/);
+  assert.doesNotMatch(nul, /\d+k context/);
   assert.match(nul, /Fernway · Sonnet · 2 min/);
   // soon: the number is enough
   const soon = rowHtml(html, 'fx-0022');
-  assert.match(soon, /92k ctx/);
+  assert.match(soon, /92k context/);
   assert.doesNotMatch(soon, /class="tag"/);
   // now: a quiet tag right after the number, the why as its title and in the row's aria text
   const now = rowHtml(html, 'fx-0021');
-  assert.match(now, /class="pv"><span class="tag" title="Idle 12 min: next turn re-reads all 152k">Compact\?<\/span> 152k ctx · Idle 12 min · Tidepool · Opus · 1 hr 35 min</);
-  assert.match(now, /aria-label="Refactor the sync worker\. Compact\? Idle 12 min: next turn re-reads all 152k\. 152k ctx\. Idle/);
+  assert.match(now, /class="pv"><span class="tag" title="Idle 12 min: next turn re-reads all 152k">Compact\?<\/span> 152k context · Idle 12 min · Tidepool · Opus · 1 hr 35 min</);
+  assert.match(now, /aria-label="Refactor the sync worker\. Compact\? Idle 12 min: next turn re-reads all 152k\. 152k context\. Idle/);
   // now, but no Orca terminal: the tag tells the owner to type it
   assert.match(rowHtml(html, 'fx-0023'), /class="tag" title="Re-reads 128k tokens every turn\. Type \/compact in that chat">Compact\?/);
 });
@@ -379,7 +379,7 @@ test('panel: Compact confirms first, then sends exactly one compact with the id 
   const row = rowHtml(p.html(), 'fx-0021');
   // the question and its reason on the line under the row; the row keeps its meta line, without the tag
   assert.match(row, /<div class="cwhy" data-key="why:fx-0021"><span class="ask">Compact this chat\?<\/span> Idle 12 min: next turn re-reads all 152k<\/div>/);
-  assert.match(row, /class="pv">Idle 12 min · Tidepool · Opus · 152k ctx · 1 hr 35 min</);
+  assert.match(row, /class="pv">Idle 12 min · Tidepool · Opus · 152k context · 1 hr 35 min</);
   assert.match(row, /data-do="compact-go" data-id="fx-0021">Compact<\/button>/);
   assert.match(row, /data-do="cancel" data-id="fx-0021">Cancel/);
   assert.equal(compacts(p).length, 0);
@@ -435,7 +435,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   p.window.kadans.render({ agents: smaller });
   html = p.html();
   assert.doesNotMatch(html, /Compacting…/);
-  assert.match(rowHtml(html, 'fx-0021'), /21k ctx/);
+  assert.match(rowHtml(html, 'fx-0021'), /21k context/);
   assert.match(html, /data-do="compact" data-id="fx-0022"/);
 
   // the other way: nothing changes for 90 s -> a quiet note, then Compact may be offered again
@@ -462,7 +462,7 @@ test('panel: Suggest compact Off hides every hint and button; the segment sets c
   let html = p.html();
   assert.doesNotMatch(html, /class="tag"/);
   assert.doesNotMatch(html, /data-do="compact"/);
-  assert.match(html, /152k ctx/); // the number stays
+  assert.match(html, /152k context/); // the number stays
   p.tap({ do: 'compact', id: 'fx-0021' });
   assert.doesNotMatch(p.html(), /Compact this chat\?/);
   // Settings: Off is pressed and can be picked (the CLI stores 101 since k12)
@@ -518,12 +518,12 @@ test('panel: a refused compact shows the CLI reason on its row for 8 s, clears t
   assert.match(p.html(), /data-do="compact" data-id="fx-0022"/); // not in flight any more
   assert.ok(timers.some((t) => t.ms <= 8100 && t.ms >= 8000), 'a re-render is scheduled when the reason expires');
   // other rows are untouched
-  assert.match(rowHtml(p.html(), 'fx-0022'), /92k ctx/);
+  assert.match(rowHtml(p.html(), 'fx-0022'), /92k context/);
   clock.now += 8_100;
   p.window.kadans.render({});
   row = rowHtml(p.html(), 'fx-0021');
   assert.doesNotMatch(row, /unsent text/);
-  assert.match(row, /Compact\?<\/span> 152k ctx/);
+  assert.match(row, /Compact\?<\/span> 152k context/);
 });
 
 test('panel: a refused stop shows its reason on the row; a successful result, an unknown action and a junk payload change nothing', () => {
@@ -588,7 +588,7 @@ test('panel: Compacted shows on the row once the context dropped after an accept
   const smaller = F.compact.agents.map((a) => (a.id === 'fx-0021' ? { ...a, context: { tokens: 21000, window: 200000, pct: 10.5, advice: 'none', why: null } } : a));
   p.window.kadans.render({ agents: smaller });
   let row = rowHtml(p.html(), 'fx-0021');
-  assert.match(row, /class="pv">Compacted · Tidepool · Opus · 21k ctx/);
+  assert.match(row, /class="pv">Compacted · Tidepool · Opus · 21k context/);
   assert.doesNotMatch(row, /Compacting…|class="warn"/);
   clock.now += 8_100;
   p.window.kadans.render({});
@@ -1039,4 +1039,17 @@ test('panel: Settings Back reports the main screen\'s height as its slide-in sta
   } finally {
     FNode.prototype.getBoundingClientRect = rect;
   }
+});
+
+test('opening or closing the popover drops focus, so no row comes back highlighted', () => {
+  const p = loadPanel();
+  let blurred = 0;
+  p.window.document.activeElement = { blur: () => { blurred += 1; } };
+  p.window.kadans.visible(false);
+  assert.equal(blurred, 1);
+  p.window.kadans.visible(true);
+  assert.equal(blurred, 2);
+  p.window.document.activeElement = p.window.document.body;
+  p.window.kadans.visible(true); // nothing focused: nothing to drop
+  assert.equal(blurred, 2);
 });
