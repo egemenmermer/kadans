@@ -184,7 +184,9 @@ path, in any letter case, is 404; no directory listing), slow clients are cut of
 uninstall, no pairing or unpairing, no CORS, and the pages may not be framed (`Content-Security-Policy: default-src
 'self'` with inline styles allowed for the panel's gauges, never inline scripts; `X-Frame-Options: DENY`). A request
 must name the server's own address (Host header), which also stops DNS rebinding pages. Once `phone` is false, every
-API request gets 503 even if the server is still running.
+API request gets 503 even if the server is still running. The paired device's token is the security boundary: the
+`confirmed: true` flag on starting a task or a handoff is a safety step in the page, not a second check on the server, so
+anything holding a paired token can start workers (revoke the device to stop it).
 
 Use Tailscale. On Tailscale the traffic is end-to-end encrypted between your own devices. On a LAN address it is plain
 HTTP: anyone on the same Wi-Fi (a cafe, an office, a shared flat) could read the token on the wire and then act as your

@@ -3,9 +3,12 @@ import AppKit
 /// Menu bar item + popover.
 /// k19: pushed, not just polled. A change notice (hook event, usage sample, session file; see ChangeWatcher) refreshes
 /// the panel within ~0.5 s while the popover is open, and the menu bar's working count (`agents --brief --json`) while it
-/// is closed. Fallback polls: panel every 2 s while open; brief every 10 s and `status --json` every 30 s while closed.
-/// Never two CLI runs of the same kind at once (Gate), and the closed-popover runs keep to a CPU budget.
-/// Reads fresh usage (`kadans usage fetch`) every 120 s and on popover open when the last reading is over 60 s old.
+/// is closed. Fallback polls: panel every 2 s while open; the closed tick every 60 s (120 s on battery or after 5 min
+/// without input, see Schedule). Never two CLI runs of the same kind at once (Gate), and the closed-popover runs keep to a
+/// CPU budget. perf-1: one node start per tick, open (`live --json`: status + agents) or closed (`live --brief --json`:
+/// status + brief, at most every 30 s; the agents are counted at most every count gap, the old brief budget).
+/// Reads fresh usage (`kadans usage fetch`) every 120 s and on popover open when the last reading is over 60 s old (perf-1:
+/// the timer skips it while the API reader is off or backing off).
 /// k25: the spare-quota check (AutoGas: `gas tick --json` every 5 min and 1 min after each reset) runs on its own timers,
 /// popover open or closed, screen locked or not.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
@@ -27,29 +30,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // k19: push refresh and fallback polls
     static let openPoll: TimeInterval = 2
     static let openMinGap: TimeInterval = 1
-    static let briefPoll: TimeInterval = 10
-    static let statusPoll: TimeInterval = 30
-    /// Share of one CPU core the closed-popover brief may use on average (status adds ~0.3 % at one run per 30 s).
-    static let briefCpuShare = 0.005
-    static let briefMinGap: TimeInterval = 3
-    static let briefMaxGap: TimeInterval = 120
 
     private var watcher: ChangeWatcher?
     private var pollTimer: Timer?
-    private var statusTimer: Timer?
     private lazy var panelGate = Gate(minGap: Self.openMinGap) { [weak self] done in
         guard let self else { return done() }
         self.panel.refresh(completion: done)
     }
-    private lazy var briefGate = Gate(minGap: Self.briefPoll) { [weak self] done in self?.runBrief(done) ?? done() }
-    private lazy var statusGate = Gate(minGap: Self.statusPoll) { [weak self] done in self?.runStatus(done) ?? done() }
+    /// perf-1: the closed popover's one tick (`live --brief --json`: the menu bar title and the working count).
+    private lazy var tickGate = Gate(minGap: Schedule.closedMinGap) { [weak self] done in self?.runTick(done) ?? done() }
     private let liveQueue = DispatchQueue(label: "dev.kadans.live", qos: .utility)
-    /// Seconds one brief run takes (moving average); sets the closed-popover brief gap.
-    private var briefCost: TimeInterval = 0.2
+    /// Seconds one closed tick that counted the agents takes (moving average); sets the count gap (Schedule.countGap).
+    private var countCost: TimeInterval = 0.3
+    /// An agents change came while the count gap held the count back: one more tick once the gap is over.
+    private var countDue = false
+    private var lastCount: Date = .distantPast
+    private var countWake: DispatchWorkItem?
     private var briefFailLogged = false
     private var lastBrief: Brief?
+    /// From the last status read: the usage API reader is on, and when it may try again (perf-1: no idle `usage fetch`).
+    private var usageApiOn: Bool?
+    private var usageNextAt: Double?
     /// k25: the spare-quota check (`gas tick --json`) every 5 min and after each window reset, popover open or closed.
     private let autoGas = AutoGas()
+    private let autoCompact = AutoCompact() // k55: `compact tick` every 5 min while autoCompact is on
     /// k28: the `kadans serve` child while config `phone` is true, pairing and the device list.
     private let phone = Phone()
     private var termSource: DispatchSourceSignal?
@@ -94,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         panel.onConfig = { [weak self] cfg in
             self?.autoGas.noteConfig(cfg)
+            self?.autoCompact.noteConfig(cfg)
             self?.phone.noteConfig(cfg) // the launch refresh's config starts serve when phone is true
         }
         panel.phone = phone
@@ -118,13 +123,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         w.start()
         watcher = w
         startClosedPolls()
-        briefGate.request()
+        tickGate.request()
+        // perf-1: back from sleep or a locked screen, the closed tick runs at once (the fallback may be minutes away).
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self, !self.popover.isShown else { return }
+                self.tickGate.request()
+            }
+        }
         if noUsageFetch { log("usage fetch off (KADANS_NO_USAGE_FETCH=1)") } else { startUsagePolling() }
         autoGas.onStarted = { [weak self] _ in
             guard let self else { return }
-            if self.popover.isShown { self.panelGate.request() } else { self.briefGate.request(); self.statusGate.request() }
+            if self.popover.isShown { self.panelGate.request() } else { self.tickGate.request() }
         }
         autoGas.start()
+        autoCompact.onCompacted = { [weak self] _ in
+            guard let self, self.popover.isShown else { return }
+            self.panelGate.request()
+        }
+        autoCompact.start()
     }
 
     func applicationWillTerminate(_ note: Notification) {
@@ -137,8 +154,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if popover.isShown {
             panelGate.request()
         } else {
-            if kinds.contains(.agents) { briefGate.request() }
-            if kinds.contains(.usage) { statusGate.request() }
+            if kinds.contains(.agents) { countDue = true }
+            tickGate.request()
         }
     }
 
@@ -154,61 +171,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pollTimer = t
     }
 
+    /// The closed fallback: a change notice wakes the tick; this only covers the time rules (working -> idle after 2 min,
+    /// an old reading dimmed after 10 min, window resets). It runs the tick when the last one is older than the fallback.
     private func startClosedPolls() {
         stopPolls()
-        let b = Timer(timeInterval: Self.briefPoll, repeats: true) { [weak self] _ in self?.briefGate.request() }
-        b.tolerance = 1
+        let b = Timer(timeInterval: Schedule.closedFallback, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let gap = Schedule.fallback(onBattery: Power.onBattery, userIdle: Power.userIdle)
+            if Date().timeIntervalSince(self.tickGate.lastStart) >= gap - 2 { self.tickGate.request() }
+        }
+        b.tolerance = 5
         RunLoop.main.add(b, forMode: .common)
         pollTimer = b
-        let s = Timer(timeInterval: Self.statusPoll, repeats: true) { [weak self] _ in self?.statusGate.request() }
-        s.tolerance = 3
-        RunLoop.main.add(s, forMode: .common)
-        statusTimer = s
     }
 
     private func stopPolls() {
         pollTimer?.invalidate()
         pollTimer = nil
-        statusTimer?.invalidate()
-        statusTimer = nil
-        briefGate.cancelPending()
-        statusGate.cancelPending()
+        tickGate.cancelPending()
         panelGate.cancelPending()
     }
 
-    /// `agents --brief --json` off the main thread. Its run time sets the gap to the next one, so the brief stays within
-    /// `briefCpuShare` of a core however slow the CLI is (a node start is ~0.05-0.1 s of CPU).
-    private func runBrief(_ done: @escaping () -> Void) {
+    /// The closed tick off the main thread: `live --brief --json` = {status, brief, counted} in one node start (an older CLI
+    /// without `live`: `agents --brief --json` and `status --json`). The run time of a tick that counted sets the count gap,
+    /// so counting stays within Schedule.countCpuShare of a core however slow Orca is.
+    private func runTick(_ done: @escaping () -> Void) {
+        let gap = Schedule.countGap(cost: countCost)
         liveQueue.async { [weak self] in
             let started = Date()
-            let r = CLI.run(["agents", "--brief", "--json"], timeout: 10)
+            let r = CLI.run(["live", "--brief", "--json", "--count-gap", String(Int(gap.rounded()))], timeout: 15)
+            var obj = r.json as? [String: Any]
+            if obj == nil {
+                let b = CLI.run(["agents", "--brief", "--json"], timeout: 10)
+                let s = CLI.run(["status", "--json"])
+                if !s.ok { log("status --json failed (code \(s.code), timeout \(s.timedOut)): \(s.err)") }
+                obj = ["brief": b.json ?? NSNull(), "status": s.json ?? NSNull(), "counted": true]
+            }
             let took = Date().timeIntervalSince(started)
-            let brief = Brief(json: r.json)
+            let brief = Brief(json: obj?["brief"])
+            let status = obj?["status"] as? [String: Any]
+            let counted = obj?["counted"] as? Bool ?? true
             DispatchQueue.main.async {
                 guard let self else { return done() }
-                self.briefCost = self.briefCost * 0.7 + took * 0.3
-                self.briefGate.minGap = min(Self.briefMaxGap, max(Self.briefMinGap, self.briefCost / Self.briefCpuShare))
+                if counted {
+                    self.countCost = self.countCost * 0.7 + took * 0.3
+                    self.lastCount = started
+                    self.countDue = false
+                    self.countWake?.cancel()
+                    self.countWake = nil
+                } else if self.countDue && self.countWake == nil && !self.popover.isShown {
+                    let wait = max(1, self.lastCount.addingTimeInterval(Schedule.countGap(cost: self.countCost)).timeIntervalSinceNow + 1.5)
+                    let w = DispatchWorkItem { [weak self] in
+                        guard let self else { return }
+                        self.countWake = nil
+                        if !self.popover.isShown { self.tickGate.request() }
+                    }
+                    self.countWake = w
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: w)
+                }
                 if brief == nil && !self.briefFailLogged {
                     self.briefFailLogged = true
-                    log("agents --brief --json: no brief yet (code \(r.code)); working motion stays off until it answers")
+                    log("live --brief --json: no brief yet (code \(r.code)); working motion stays off until it answers")
                 }
                 if brief != self.lastBrief, let b = brief { log("brief: working \(b.working), needs you \(b.needsYou)") }
                 self.lastBrief = brief
-                if !self.popover.isShown { self.blinker.setWorking(self.fakeWorking ?? brief?.working) }
-                done()
-            }
-        }
-    }
-
-    /// `status --json` alone (the menu bar title) while the popover is closed; the panel's full refresh does it when open.
-    private func runStatus(_ done: @escaping () -> Void) {
-        liveQueue.async { [weak self] in
-            let r = CLI.run(["status", "--json"])
-            let status = r.json as? [String: Any]
-            DispatchQueue.main.async {
-                guard let self else { return done() }
-                if !r.ok { log("status --json failed (code \(r.code), timeout \(r.timedOut)): \(r.err)") }
-                if !self.popover.isShown { self.updateItem(status) }
+                if !self.popover.isShown {
+                    self.blinker.setWorking(self.fakeWorking ?? brief?.working)
+                    self.updateItem(status)
+                }
                 done()
             }
         }
@@ -256,7 +286,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: fresh usage (lib/usage-api.mjs; the CLI checks config usageApi, back-off and the 60 s minimum itself)
 
     private func startUsagePolling() {
-        let t = Timer(timeInterval: Self.usageEvery, repeats: true) { [weak self] _ in self?.fetchUsage() }
+        let t = Timer(timeInterval: Self.usageEvery, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let next = self.usageNextAt.map { Date(timeIntervalSince1970: $0 / 1000) }
+            if Schedule.fetchUsage(now: Date(), apiOn: self.usageApiOn, nextAt: next) { self.fetchUsage() }
+        }
         t.tolerance = 10
         RunLoop.main.add(t, forMode: .common)
         usageTimer = t
@@ -275,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 guard let self else { return }
                 self.usageBusy = false
                 if (obj?["ok"] as? Bool) == true {
-                    if self.popover.isShown { self.panelGate.request() } else { self.statusGate.request() }
+                    if self.popover.isShown { self.panelGate.request() } else { self.tickGate.request() }
                 } else {
                     let code = obj?["code"] as? String ?? (r.timedOut ? "timeout" : "exit \(r.code)")
                     if !["off", "too_soon", "backoff"].contains(code) { log("usage fetch: \(code)") }
@@ -319,6 +353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let item = MenuBarItem(status: status)
         let accounts = status?["accounts"] as? [[String: Any]] ?? []
         ownLastSample = (accounts.first { ($0["own"] as? Bool) == true }?["lastSample"] as? NSNumber)?.doubleValue
+        if let api = status?["usageApi"] as? [String: Any] {
+            usageApiOn = api["enabled"] as? Bool
+            usageNextAt = (api["nextAt"] as? NSNumber)?.doubleValue
+        }
         autoGas.noteStatus(status)
         blinker.setFace(item.face)  // a state change wins over a blink in progress
         button.attributedTitle = item.title

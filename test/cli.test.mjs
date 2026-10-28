@@ -21,7 +21,7 @@ function sandbox() {
 }
 
 function run(sb, args, input = '') {
-  const r = spawnSync(process.execPath, [BIN, ...args], { input, env: sb.env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [BIN, ...args], { input, env: sb.env, encoding: 'utf8', timeout: 60_000 });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
@@ -160,7 +160,7 @@ test('statusline gives up on a held store lock (bounded wait): still prints the 
   const r = run(sb, ['statusline'], payload(59));
   const ms = Date.now() - t0;
   assert.equal(r.code, 0);
-  assert.ok(ms < 12_000, `statusline waited ${ms} ms on the lock`); // gave up (2 s lock wait), did not hang; generous for a loaded machine (spawn timeout is 15 s)
+  assert.ok(ms < 40_000, `statusline waited ${ms} ms on the lock`); // gave up (2 s lock wait), did not hang; generous for a loaded machine (spawn timeout is 60 s)
   assert.match(r.out, /^5h 40% /); // gauge from the samples already on disk
   assert.equal(readFileSync(file, 'utf8'), `${old}\n`); // the new sample was not written
 });

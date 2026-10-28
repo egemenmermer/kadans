@@ -80,6 +80,15 @@
   };
   // k25: the account's spare quota is off, so the row is off and says why.
   K.KADANS_FIXTURES.settings_autogas_off = { status: twoAccounts, agents: KF.base(), install: install([]), after: toAccounts, config };
+  // k55: "Compact idle chats automatically" under Suggest compact, off (the default) and on; Advanced scrolled to "Agents".
+  const toAgents = (doc) => {
+    openAdvanced(doc);
+    scrollTo(doc, 'Agents');
+  };
+  const ac = { autoCompact: false, autoCompactIdleMin: 10, autoCompactMinTokens: 120000, autoCompactPerHour: 4 };
+  K.KADANS_FIXTURES.settings_autocompact_off = { status: twoAccounts, agents: KF.base(), install: install([]), after: toAgents, config: { ...config, ...ac } };
+  K.KADANS_FIXTURES.settings_autocompact_on = { status: twoAccounts, agents: KF.base(), install: install([]), after: toAgents,
+    config: { ...config, ...ac, autoCompact: true } };
   // An older install: the two pace hooks are missing.
   K.KADANS_FIXTURES.hooks = {
     status: KF.status(), agents: KF.base(), config,

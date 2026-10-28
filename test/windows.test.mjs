@@ -188,7 +188,7 @@ test('kadans connect (real CLI, fake orca): prints the code once with the hint a
   writeFileSync(fake, `#!/usr/bin/env node\nconsole.log('argv ' + process.argv.slice(2).join(' '));\nconsole.log('Orca server ready');\nconsole.log('Web client URL: http://127.0.0.1:1/#${CODE}');\nconsole.log('Pairing URL: ${CODE}');\n`);
   chmodSync(fake, 0o755);
   const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
-  const r = spawnSync(process.execPath, [BIN, 'connect', '--name', 'other'], { env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [BIN, 'connect', '--name', 'other'], { env, encoding: 'utf8', timeout: 60_000 });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /argv serve\n/); // the name is never passed to orca
   assert.equal(r.stdout.split(CODE).length - 1, 1, r.stdout);
@@ -198,7 +198,7 @@ test('kadans connect (real CLI, fake orca): prints the code once with the hint a
   for (const f of files) assert.ok(!readFileSync(f, 'utf8').includes('K37FAKECODE9z'), f);
   assert.deepEqual(readdirSync(home), []);
 
-  const miss = spawnSync(process.execPath, [BIN, 'connect'], { env: { ...env, KADANS_ORCA_BIN: '', PATH: '' }, encoding: 'utf8', timeout: 15000 });
+  const miss = spawnSync(process.execPath, [BIN, 'connect'], { env: { ...env, KADANS_ORCA_BIN: '', PATH: '' }, encoding: 'utf8', timeout: 60_000 });
   assert.equal(miss.status, 1);
   assert.equal(miss.stderr, `${ORCA_MISSING}\n`);
 });

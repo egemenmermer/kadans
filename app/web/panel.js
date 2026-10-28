@@ -139,6 +139,7 @@
     compact: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8v4.4M5.6 4 8 6.2 10.4 4M8 14.2V9.8M5.6 12 8 9.8l2.4 2.2M3.5 8h9"/></svg>',
     chev: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4l4 4-4 4"/></svg>',
     theme: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>',
+    more: '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>', // polish-2
     pen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 3.2l2.2 2.2-7.3 7.3-2.9.7.7-2.9z"/></svg>',
     gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg>',
     // k52: the inbox tray
@@ -149,7 +150,7 @@
   // confirm: agent id with an inline confirm open; kind 'stop' | 'replace' (task = the picked task id).
   // picker: agent id whose "Replace with" menu is open. pacer: agent id whose "Pace this agent" menu is open.
   // idleOpen: the "N idle" group is expanded.
-  const view = { confirm: null, kind: 'stop', task: null, picker: null, pacer: null, idleOpen: false, focusPick: false, timer: null, account: null,
+  const view = { confirm: null, kind: 'stop', task: null, picker: null, pacer: null, more: null, moreAt: 0, moreUp: false, focusMore: false, idleOpen: false, focusPick: false, timer: null, account: null,
     dismissed: new Set(), scroll: 0, height: 0, data: null,
     // k4c: screen 'main' | 'settings' | 'review'; from: where Review was opened; pending config picks; apply flow flags.
     screen: 'main', from: 'main', pending: {}, uninstallOpen: false, applyConfirm: false, applying: false, applied: false,
@@ -176,7 +177,7 @@
     rename: null, titles: new Map(), order: null, liveIds: [], awayTitles: new Map(),
     // k49: tell = the open composer { id, title, short, machine, n (characters), why (hint key) }: never the text, which
     // lives only in the textarea; telling = a message sent and not answered yet { id, at }.
-    tell: null, telling: null,
+    tell: null, telling: null, ho: null, // k54: ho, the handoff under way (one at a time)
     // k52: ibx = the inbox screen (see "inbox (k52)"); repos = the last repos answer { machine, list, err }.
     ibx: null, repos: null };
 
@@ -652,6 +653,7 @@
     if (r && typeof r === 'object' && (r.action === 'computers-add' || r.action === 'computers-remove')) return compResult(r); // k41
     if (r && typeof r === 'object' && r.action === 'agent-send' && r.id != null) return tellResult(r); // k49: fixed lines only
     if (r && typeof r === 'object' && IBX_ACTIONS.has(r.action)) return inboxResult(r); // k52: by action (ids differ per bridge)
+    if (r && typeof r === 'object' && HO_ACTIONS.has(r.action)) return handoffResult(r); // k54
     // k32: a refused reorder drops the local order (the rows go back to the served order); a refused rename drops the
     // name shown early and says why on the row.
     if (r && typeof r === 'object' && r.ok !== true && r.action === 'reorder') {
@@ -698,39 +700,155 @@
         `<button class="pill" data-do="cancel" data-id="${esc(id)}">Cancel</button></div>`;
     }
     if (st === 'ended') return `<div class="acts">${btn('dismiss', id, IC.x, 'Dismiss')}</div>`;
-    if (a.machine) return remoteActs(a, st, id); // k48: another computer's agent: close/stop and compact where its flags allow
-    let first;
+    const { primary, menu } = rowActions(a, st, tasks);
+    if (!primary && !menu.length) return '<div class="acts"></div>'; // k38: nothing it can do there: no disabled buttons either
+    const ab = (x) => btn(x.do, id, x.icon, x.label, { disabled: x.disabled, why: x.why, menu: x.popup });
+    // A menu of one is no menu: that action sits on the row itself (still two buttons at most).
+    const rest = menu.length === 1 ? ab(menu[0]) : menu.length ? moreBtn(id) : '';
+    const on = view.picker === id || view.pacer === id || view.more === id || hoOpen(a);
+    return `<div class="acts${on ? ' on' : ''}">${primary ? ab(primary) : ''}${rest}</div>`;
+  }
+
+  // polish-2: every action a row allows, in one fixed order (the More menu's order, on the Mac and the phone alike).
+  // Each keeps its own data-do, so the bridge message is the one it always was. Actions that do not apply to a row are
+  // left out, as before; actions that apply but cannot run from here stay in, greyed, with the reason.
+  // k48: another computer's agent: Tell, Compact and Close/Stop where its flags allow; never pace, replace, rename or
+  // open (this computer only).
+  function rowActions(a, st, tasks) {
+    const id = a.id;
+    const list = [];
+    const add = (x) => list.push({ disabled: false, why: '', popup: false, ...x });
+    const remote = Boolean(a.machine);
+    const canStop = remote ? remoteCan(a, 'canStop') : canStopAgent(a);
     // Only Claude sessions on this Mac carry Kadans hooks; Orca-only rows have no session id to pace.
     const canPace = a.source !== 'orca' && !String(id).startsWith('orca:');
     const noPace = "Can't pace from here";
-    if (st === 'needs-you') first = net.mode === 'bridge' ? btn('open', id, IC.open, 'Open in terminal') : ''; // no terminal on a phone
-    else if (st === 'slowed' || st === 'paused') first = btn('resume', id, IC.play, 'Resume', { disabled: !canPace, why: noPace });
-    else first = btn('pace', id, IC.pace, 'Slow or pause', { disabled: !canPace, why: noPace, menu: true });
-    const canStop = canStopAgent(a);
-    const why = !canStop ? "Can't stop from here" : !tasks.length ? 'No approved task to start' : '';
+    if (!remote && st === 'needs-you' && net.mode === 'bridge') add({ do: 'open', icon: IC.open, label: 'Open in terminal' }); // no terminal on a phone
+    if (canTell(a)) add({ do: 'tell', icon: IC.tell, label: 'Tell' }); // k49
+    const ho = remote ? null : handoffAct(a); // k54
+    if (ho) add(ho);
+    if (offerCompact(a)) add({ do: 'compact', icon: IC.compact, label: 'Compact chat' });
+    if (!remote && (st === 'slowed' || st === 'paused')) add({ do: 'resume', icon: IC.play, label: 'Resume', disabled: !canPace, why: noPace });
+    else if (!remote && st !== 'needs-you') add({ do: 'pace', icon: IC.pace, label: 'Slow or pause', disabled: !canPace, why: noPace, popup: true });
+    if (!remote) {
+      const why = !canStop ? "Can't stop from here" : !tasks.length ? 'No approved task to start' : '';
+      add({ do: 'replace', icon: IC.swap, label: 'Replace', disabled: Boolean(why), why, popup: true });
+      add({ do: 'rename', icon: IC.pen, label: 'Rename' }); // k32: double-click on the name does it too (not on a phone)
+    }
     // An idle chat closes (same `stop` bridge action, its own confirm copy); everything else stops.
-    const last = st === 'idle'
-      ? btn('close', id, IC.x, 'Close chat', { disabled: !canStop, why: "Can't close from here" })
-      : btn('confirm', id, IC.stop, 'Stop', { disabled: !canStop, why: "Can't stop from here" });
-    const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
-    // k32: on a phone (no double-click) the row's tap actions start with Rename.
-    const ren = touchUi() ? btn('rename', id, IC.pen, 'Rename') : '';
-    const tell = canTell(a) ? btn('tell', id, IC.tell, 'Tell') : ''; // k49
-    return `<div class="acts${view.picker === id || view.pacer === id ? ' on' : ''}">${ren}${tell}${first}` +
-      `${btn('replace', id, IC.swap, 'Replace', { disabled: Boolean(why), why, menu: true })}${comp}${last}</div>`;
+    if (st === 'idle') add({ do: 'close', icon: IC.x, label: 'Close chat', disabled: !canStop, why: "Can't close from here" });
+    else add({ do: 'confirm', icon: IC.stop, label: 'Stop', disabled: !canStop, why: "Can't stop from here" });
+    // k38: another computer's agent it can do nothing with shows no disabled buttons either.
+    if (remote && list.every((x) => x.disabled)) return { primary: null, menu: [] };
+    const pick = (...dos) => dos.map((d) => list.find((x) => x.do === d && !x.disabled)).find(Boolean) ?? null;
+    // One primary per state: needs you: open in its terminal (Mac); working: Tell, else Stop; idle: Tell, else Close;
+    // slowed or paused: Resume. A phone has no terminal and no Tell for a chat that waits on a question: More only.
+    const primary = st === 'needs-you' ? pick('open') : st === 'working' ? pick('tell', 'confirm') : st === 'idle' ? pick('tell', 'close')
+      : st === 'slowed' || st === 'paused' ? pick('resume') : null;
+    return { primary, menu: list.filter((x) => x !== primary) };
+  }
+  function moreItem(a, st, tasks) {
+    const items = st === 'ended' ? [] : rowActions(a, st, tasks).menu;
+    return items.length > 1 ? { key: `menu:more:${a.id}`, html: moreHtml(a, items, tellSheet()) } : null;
+  }
+  // The phone's sheet: the open row's menu, drawn over the list like the Tell sheet.
+  function moreSheet(tasks) {
+    if (!view.more || !tellSheet() || view.screen !== 'main') return null;
+    const a = findAgent(view.more);
+    return a ? moreItem(a, rowState(a), tasks) : null;
+  }
+  const moreBtn = (id) => `<button class="rb" title="More" aria-label="More actions" data-do="more" data-id="${esc(id)}" aria-haspopup="menu" ` +
+    `aria-expanded="${view.more === id ? 'true' : 'false'}">${IC.more}</button>`;
+
+  // The More menu: the row's other actions, one per line with its icon; a greyed one says why on a second line. Stop or
+  // Close sits last, under a hairline. Roving focus: the active item has tabindex 0 (view.moreAt), the rest -1. Inline
+  // under the row on the Mac (above it when the row is near the bottom of a full list), a bottom sheet on the phone.
+  function moreHtml(a, items, sheet) {
+    const id = esc(a.id);
+    const at = Math.min(Math.max(0, view.moreAt), items.length - 1);
+    const title = cleanTitle(titleOf(a)) || 'this chat';
+    return `<div class="pick more${sheet ? ' sheet' : view.moreUp ? ' flip' : ''}" data-key="menu:more:${id}" role="menu" aria-label="Actions for ${esc(title)}">` +
+      (sheet ? `<div class="pick-h">${esc(title)}</div>` : '') +
+      items.map((x, i) => (i && i === items.length - 1 && (x.do === 'confirm' || x.do === 'close') ? '<div class="sep" role="separator"></div>' : '') +
+        `<button role="menuitem" tabindex="${i === at ? 0 : -1}" title="${esc(x.disabled ? x.why : x.label)}" ` +
+        `aria-label="${esc(x.disabled ? `${x.label} (${x.why})` : x.label)}"${x.disabled ? ' aria-disabled="true"' : ` data-do="${x.do}" data-id="${id}"`}` +
+        `${x.popup ? ' aria-haspopup="menu"' : ''} data-key="more:${id}:${x.do}"><span class="mi" aria-hidden="true">${x.icon}</span>` +
+        `<span class="nm">${esc(x.label)}</span>${x.disabled ? `<span class="pv">${esc(x.why)}</span>` : ''}</button>`).join('') +
+      (sheet ? `<button class="mcancel" data-do="more-cancel" data-id="${id}" data-key="more:${id}:cancel">Cancel</button>` : '') + '</div>';
   }
 
-  // k48: the actions of another computer's agent. Close (idle) or Stop when its terminal there is known, Compact for an
-  // idle Claude chat, Tell (k49) for an idle or working one; never pace, replace, rename or open (this computer only).
-  function remoteActs(a, st, id) {
-    const stop = remoteCan(a, 'canStop');
-    const last = st === 'idle'
-      ? btn('close', id, IC.x, 'Close chat', { disabled: !stop, why: "Can't close from here" })
-      : btn('confirm', id, IC.stop, 'Stop', { disabled: !stop, why: "Can't stop from here" });
-    const comp = offerCompact(a) ? btn('compact', id, IC.compact, 'Compact chat') : '';
-    const tell = canTell(a) ? btn('tell', id, IC.tell, 'Tell') : ''; // k49: when its flags allow send
-    if (!stop && !comp && !tell) return '<div class="acts"></div>'; // nothing it can do there: no disabled buttons either (k38)
-    return `<div class="acts">${tell}${comp}${last}</div>`;
+  // The open row's menu items, as drawn (empty when the row has none or is gone).
+  function moreItems(id = view.more) {
+    const a = id == null ? null : findAgent(id);
+    if (!a || rowState(a) === 'ended') return [];
+    return rowActions(a, rowState(a), startable(view.data?.status?.queue)).menu;
+  }
+  const MORE_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End']);
+  function moreToggle(id) {
+    if (view.more === id) { view.more = null; return; }
+    const items = moreItems(id);
+    if (items.length < 2) return;
+    setConfirm(null);
+    view.picker = null;
+    view.pacer = null;
+    if (view.ho?.phase === 'pick') view.ho = null; // k54's computer menu is a menu too
+    view.more = id;
+    view.moreAt = Math.max(0, items.findIndex((x) => !x.disabled));
+    view.moreUp = moreFlip(id, items.length);
+    view.focusMore = true;
+  }
+  function moreClose() {
+    const id = view.more;
+    view.more = null;
+    render({});
+    moreFocusBack(id, 'more');
+  }
+  function moreFocusBack(id, what) {
+    const q = (d) => root().querySelector(`.row [data-do="${d}"][data-id="${CSS.escape(String(id))}"]`);
+    (q(what) ?? q('more'))?.focus?.();
+  }
+  function moreMove(key) {
+    const n = moreItems().length;
+    if (!n) return;
+    const i = Math.min(view.moreAt, n - 1);
+    view.moreAt = key === 'Home' ? 0 : key === 'End' ? n - 1 : (i + (key === 'ArrowDown' ? 1 : n - 1)) % n;
+    render({});
+    root().querySelector('.pick.more [tabindex="0"]')?.focus?.();
+  }
+  // Near the bottom of a list that cannot grow any more (the popover's cap), the menu opens above the row so it is never
+  // cut off; the list then scrolls by the menu's height, so the row stays where it was under the pointer.
+  function moreFlip(id, n) {
+    if (tellSheet()) return false;
+    try {
+      const list = listNode();
+      const row = root().querySelector(`[data-key="row:${CSS.escape(String(id))}"]`);
+      const panel = root().firstElementChild;
+      if (!list?.getBoundingClientRect || !row?.getBoundingClientRect || !panel) return false;
+      const lr = list.getBoundingClientRect();
+      const rr = row.getBoundingClientRect();
+      const cap = parseFloat(getComputedStyle(panel).maxHeight);
+      const grow = Number.isFinite(cap) ? Math.max(0, cap - panel.getBoundingClientRect().height) : 0;
+      const need = 12 + n * 30;
+      return Number.isFinite(rr.bottom) && rr.bottom + need > lr.bottom + grow && rr.top - need >= lr.top;
+    } catch { return false; }
+  }
+  // After the menu is drawn: the first action takes focus; a flipped menu scrolls the list so the row stays put; the
+  // phone's sheet slides up (motion on only), as the Tell sheet does.
+  function moreShown(el) {
+    const m = el.querySelector?.('.pick.more');
+    if (!m) return;
+    if (tellSheet()) {
+      if (motionOk() && m.classList) {
+        m.classList.add('up');
+        busy(320);
+        setTimeout(() => m.classList.remove('up'), 340);
+      }
+    } else {
+      const list = listNode();
+      if (view.moreUp && list) list.scrollTop += m.offsetHeight || 0;
+      m.scrollIntoView?.({ block: 'nearest' });
+    }
+    m.querySelector('[tabindex="0"]')?.focus?.();
   }
 
   function pickerHtml(a, tasks) {
@@ -783,6 +901,7 @@
   // item count and a rename field is never rebuilt; a new value only patches the transform, which then glides.
   const barItem = (pg) => S('div', { class: pg ? 'pb' : 'pb off', 'aria-hidden': 'true' }, [S('i', { style: `transform:scaleX(${pg ? pg.frac : 0})` })]);
 
+  const AUTO_COMPACT_SHOW_MS = 10 * MIN; // k55: how long a row says "Auto-compacted"
   // Agent rows as keyed items for the list: a row is a shell (blob, text, actions) so a changed meta line replaces only
   // its text and the row node itself (hover, focus) stays.
   function agentRows(list, now, tasks) {
@@ -807,6 +926,14 @@
       if (rs?.ok) [pre, preText] = [`${esc(rs.why || 'Compacted')} · `, `${rs.why || 'Compacted'}. `]; // k48: 'Sent /compact' on a remote row
       const tl = !askC && !ask && !swap && !rs && view.telling && String(view.telling.id) === String(a.id); // k49: a message on its way
       if (tl) [pre, preText] = ['Sending… · ', 'Sending. '];
+      // k55: a chat Kadans compacted on its own (autoCompact) says so for 10 min, unless a confirm, result or send is showing.
+      const acAgo = finite(a.autoCompactedAt) ? now - a.autoCompactedAt : null;
+      if (acAgo !== null && acAgo >= 0 && acAgo < AUTO_COMPACT_SHOW_MS && !askC && !ask && !swap && !cs && !rs && !tl) {
+        const m = `${Math.max(1, Math.round(acAgo / MIN))}m`;
+        [pre, preText] = [`Auto-compacted · ${m} · `, `Auto-compacted ${m} ago. `];
+      }
+      const hm = !askC && !ask && !swap && !rs && !tl ? handoffMeta(a) : null; // k54: Writing handoff…
+      if (hm) [pre, preText] = hm;
       if (cs?.failedAt) {
         const note = 'Kadans saw no smaller context within 90 s. If it did not compact, type /compact in that chat.';
         [pre, preText] = [`<span class="warn" title="${esc(note)}">Compact not confirmed</span> · `, `Compact not confirmed: ${note} `];
@@ -835,20 +962,27 @@
       const subT = tokens(a.subagentTokens);
       const tip = [title, life ? `${life} tokens since start, cache reads not counted` : null, subT ? `sub-agents: ${subT}` : null].filter(Boolean).join('\n');
       const key = `row:${a.id}`;
-      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id || view.tapKey === key ? ' hov' : ''}${view.rename && String(view.rename.id) === String(a.id) ? ' renaming' : ''}`;
+      const cls = `row${st === 'ended' ? ' ended' : ''}${view.confirm === a.id || view.picker === a.id || view.pacer === a.id || view.more === a.id || view.tapKey === key ? ' hov' : ''}${view.rename && String(view.rename.id) === String(a.id) ? ' renaming' : ''}`;
       const meta = quiet || (rs && !rs.ok) ? `<div class="pv">${tag}${pre}${esc(line)}</div>`
         : `<div class="pv meta">${[['tg', tag], ['ld', pre], ['pn', pg ? pg.count : ''], ['ps', pg ? esc(pg.step) : ''], ...segs.map(([c, t]) => [c, esc(t)])].map(([c, h]) => [c, h.replace(/ · $/, '')])
           .filter(([, h]) => /[^\s·.…]/.test(h.replace(/<[^>]*>/g, ''))).map(([c, h], i) => `<span class="${c}">${i ? ' · ' : ''}${h}</span>`).join('')}</div>`;
       // The name and the meta line are separate items, so the minute tick replaces only the meta line (and a rename
       // input in the name slot keeps its node, its caret and what was typed).
+      // polish-2: the More menu, inline under the row on the Mac; above it when the row sat near the bottom of a full
+      // list (view.moreUp, read at the click). The phone's bottom sheet is drawn with the panel (moreSheet).
+      const mi = view.more === a.id && !tellSheet() ? moreItem(a, st, tasks) : null;
+      if (mi && view.moreUp) items.push(mi);
       items.push(S('div', { class: cls, tabindex: 0, 'data-key': key, title: tip,
         'aria-label': `${title}. ${tagOn ? `Compact? ${tagTip}. ${ctx}. ` : ''}${preText}${pg && !quiet ? `${pg.aria}. ` : ''}${line}` }, [blob(shapeFor(a.id), FACE[st], 30, MOVE[st] ?? null, a.id),
         S('div', { class: 'tx' }, [nameItem(a, title), barItem(pg), meta]), actsHtml(a, st, tasks)], key));
       if (askC) {
         items.push({ key: `why:${a.id}`, html: `<div class="cwhy" data-key="why:${esc(a.id)}"><span class="ask">Compact this chat?</span>${why ? ` ${esc(why)}` : ''}</div>` });
       }
+      if (mi && !view.moreUp) items.push(mi);
       if (view.picker === a.id) items.push({ key: `menu:pick:${a.id}`, html: pickerHtml(a, tasks) });
       if (view.tell && String(view.tell.id) === String(a.id) && !tellSheet()) items.push(tellItem(view.tell)); // k49: inline on the Mac
+      const hoi = handoffItem(a); // k54: the computer menu, or step 1 / step 2 inline on the Mac
+      if (hoi) items.push(hoi);
       if (view.pacer === a.id) {
         const st0 = view.data?.status;
         const slowS = finite(st0?.pace?.slowSeconds) ? st0.pace.slowSeconds : 20;
@@ -1352,6 +1486,15 @@
     return shell(body);
   }
 
+  // k55: "Compact idle chats automatically" (config autoCompact; the Mac app runs `compact tick` every 5 min while it is
+  // on). The three numbers stay config-only; the line names the idle time in force.
+  function autoCompactItem() {
+    const raw = Number(cfgVal('autoCompactIdleMin'));
+    const idle = Number.isInteger(raw) && raw > 0 ? raw : 10;
+    return sItem('autocompact', 'Compact idle chats automatically', `Types /compact into a chat that has waited ${idle}\u00a0min with a big context, while it is still cheap. ` +
+      'Never while you type or a question is open.', sSwitch('autoCompact', 'Compact idle chats automatically'));
+  }
+
   // Settings › Advanced: everything a person sets once, if ever.
   function advancedBody(d, cfg, ownKey) {
     const accounts = Array.isArray(d.status?.accounts) ? d.status.accounts : [];
@@ -1398,6 +1541,7 @@
 
     body.push(...sGroup('agents', 'Agents', [
       sItem('compact', 'Suggest compact', 'Marks idle chats that re-read a big context every turn.', compactSeg()),
+      has('autoCompact') ? autoCompactItem() : null,
       has('lean') ? sItem('lean', 'Lean mode', 'Short tips in your chats to use less quota.', sSwitch('lean', 'Lean mode')) : null,
       has('remoteAgents') && net.mode === 'bridge'
         ? sItem('remote', 'Agents on other computers', '', sSwitch('remoteAgents', 'Agents on other computers')) : null,
@@ -1496,6 +1640,7 @@
       view.applied = !view.applyFailed;
     }
     if ('agents' in d && view.shown) inboxRead(); // k52: a host refresh; reads only when one is due (the badge)
+    if ('agents' in d) handoffTick(); // k54: Writing handoff… is checked on the normal refresh
     if (view.screen !== 'main') return renderScreen();
     // k32: a row held or settling is never yanked: the data is kept and drawn when it lands.
     if (drag.phase === 'on' || drag.phase === 'settle') {
@@ -1520,6 +1665,7 @@
     if (view.confirm && view.kind === 'compact' && !all.some((a) => a.id === view.confirm && offerCompact(a))) view.confirm = null;
     if (view.picker && (!all.some((a) => a.id === view.picker) || !tasks.length)) view.picker = null;
     if (view.pacer && !all.some((a) => a.id === view.pacer && ['working', 'idle'].includes(rowState(a)))) view.pacer = null;
+    if (view.more && !all.some((a) => a.id === view.more && rowState(a) !== 'ended' && rowActions(a, rowState(a), tasks).menu.length > 1)) view.more = null;
     if (!old.length) view.closeAll = false;
     if (view.tapKey && !all.some((a) => `row:${a.id}` === view.tapKey)) view.tapKey = null;
     // k49: the chat left the list (or ended): its composer closes, and what was typed goes with it
@@ -1566,6 +1712,10 @@
     }
     blocks.push(bottom(status, g.mode));
     if (view.tell && tellSheet()) blocks.push(tellItem(view.tell)); // k49: the phone's bottom sheet
+    const ms = moreSheet(startable(status?.queue)); // polish-2: the row's More menu as the phone's bottom sheet
+    if (ms) blocks.push(ms);
+    const hos = handoffSheet(); // k54: step 1 / step 2 as the phone's bottom sheet
+    if (hos) blocks.push(hos);
     // k27 phone: pairing / pair again replace the panel; "can't reach your Mac" sits above the last reading.
     const pc = phoneCard();
     if (pc && net.state !== 'offline' && net.state !== 'off') blocks.splice(0, blocks.length, pc);
@@ -1595,7 +1745,10 @@
       if (list && view.scroll) list.scrollTop = view.scroll;
     }
     view.tree = tree;
-    if (view.focusPick) {
+    if (view.focusMore) {
+      view.focusMore = false;
+      moreShown(el);
+    } else if (view.focusPick) {
       view.focusPick = false;
       el.querySelector('.pick [data-do="pick"], .pick [data-do="pace-set"]')?.focus();
     } else if (focusKey && !el.contains(document.activeElement)) restoreFocus(el, focusKey);
@@ -2037,7 +2190,7 @@
   function tellCheck(v) {
     const t = String(v ?? '').replace(/\t/g, '  ').replace(/\r\n?/g, '\n').replace(/^\s+|\s+$/gu, '');
     const n = Array.from(t).length;
-    const why = !t ? 'empty' : /^[!/#]/.test(t) ? 'lead' : /^-/.test(t) ? 'dash' : n > TELL_MAX ? 'long' : TELL_BAD.test(t) ? 'bad' : null;
+    const why = !t ? 'empty' : /^[!/#]/.test(t) || /\n\s*!/.test(t) ? 'lead' : /^-/.test(t) ? 'dash' : n > TELL_MAX ? 'long' : TELL_BAD.test(t) ? 'bad' : null;
     return why ? { ok: false, n, why } : { ok: true, n, text: t };
   }
   // A local chat in a known Orca terminal that is idle or working (also slowed or paused), or another computer's chat
@@ -2178,6 +2331,229 @@
       css?.setProperty?.('--kb', '0px');
     }
   }
+
+  // ---------- continue on another computer (k54) ----------
+  // "Continue on kasa" on a local chat that can be told something (canTell). Step 1, one confirm line: Kadans asks the
+  // chat to write a one-page handoff note and push its branch (`handoff-ask {id}`: the CLI types its own fixed
+  // instruction; the page sends no text). The row then says "Writing handoff…", re-checked with `handoff-status {id,
+  // machine}` on the normal refresh at most every HO_CHECK_MS; after HO_LATE_MS "No handoff yet. Check the chat.". Step 2
+  // once origin holds the note: "Handoff ready · <branch>. Start on <machine> · <repo>?" -> `handoff-start {id, machine,
+  // repo, confirmed: true}`; Kadans builds the task text itself. The computers come from the inbox payload (k51 leaves
+  // prod-looking ones out; offline ones are left out here), so the action shows only while the inbox is on, which the
+  // start needs anyway. Inline cards on the Mac, the bottom sheet on the phone; results are fixed lines, never the CLI's.
+  // view.ho: { id, machine, machineName, phase: 'pick' | 'ask' | 'asking' | 'writing' | 'ready' | 'starting', at (asked),
+  //   sent, checkAt, checking, late, branch, repos, repo, line }
+  const HO_ACTIONS = new Set(['handoff-ask', 'handoff-status', 'handoff-start']);
+  const HO_CHECK_MS = 15_000;
+  const HO_LATE_CHECK_MS = 60_000;
+  const HO_LATE_MS = 15 * 60_000; // lib/handoff.mjs LATE_MS
+  const HO_GIVE_UP_MS = 2 * 3600_000; // then the row stops checking; asking again starts over
+  const HO_WAIT_MS = 60_000; // a check with no answer by then may go again
+  const HO_REPOS = 8;
+  const IC_HANDOFF = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M9 3H3.5c-.8 0-1.5.7-1.5 1.5v7c0 .8.7 1.5 1.5 1.5H9"/><path d="M6.5 8H14M11.2 5.2 14 8l-2.8 2.8"/></svg>';
+  const HO_LINES = [
+    [/inbox is off/i, 'The inbox is off. Set it up in the Inbox first.'],
+    [/no pushed handoff/i, 'No pushed handoff note yet. Check the chat.'],
+    [/git repo with an origin/i, 'This chat’s folder has no git origin to push to.'],
+    [/chat on this Mac|not a chat Kadans knows/i, 'Only chats on this Mac can hand off.'],
+    [/branch or note path/i, 'Kadans can’t use that branch or note name.'],
+    [/paired computer, not/i, 'Pick another computer, not this Mac.'],
+  ];
+  const lineIn = (list, why) => list.find(([re]) => re.test(String(why ?? '')))?.[1] ?? null;
+  const hoMachines = () => inboxMachines().filter((m) => m.id !== 'local' && !machineOff(m));
+  const hoOf = (a) => (view.ho && String(view.ho.id) === String(a.id) ? view.ho : null);
+  // A step is open on the Mac: the row keeps its actions shown (on the phone the step is a sheet; the row stays as it is).
+  const hoOpen = (a) => !tellSheet() && ['pick', 'ask', 'ready'].includes(hoOf(a)?.phase);
+  const hoName = (h) => machineText(h.machine, h.machineName) || 'the other computer';
+  // The row's "Continue on kasa" action (the More menu, polish-2), or null where it does not apply.
+  function handoffAct(a) {
+    const ms = hoMachines();
+    if (a.machine || String(a.id).startsWith('remote:') || !ms.length || !canTell(a)) return null;
+    const label = ms.length === 1 ? `Continue on ${machineText(ms[0].id, ms[0].name)}` : 'Continue on…';
+    return { do: 'handoff', icon: IC_HANDOFF, label, popup: ms.length > 1 };
+  }
+  // The row's lead while a handoff is under way (a confirm or a result on the row wins; see the row loop).
+  function handoffMeta(a) {
+    const h = hoOf(a);
+    const st = rowState(a);
+    if (!h || st === 'needs-you' || st === 'ended') return null; // e.g. the chat asks before it pushes: "Needs you" stays (checks go on)
+    if (h.phase === 'asking') return ['Asking… · ', 'Asking the chat. '];
+    if (h.phase === 'starting') return [`Starting on ${esc(hoName(h))}… · `, `Starting on ${hoName(h)}. `];
+    if (h.phase !== 'writing') return null;
+    if (h.late || Date.now() - h.at >= HO_LATE_MS) return ['<span class="warn">No handoff yet. Check the chat.</span> · ', 'No handoff yet. Check the chat. '];
+    return ['Writing handoff… · ', 'Writing handoff. '];
+  }
+  function handoffOpen(id) {
+    const a = findAgent(id);
+    if (!a || !handoffAct(a)) return;
+    const h = view.ho;
+    if (h && String(h.id) === String(a.id)) {
+      if (h.phase === 'writing') return handoffTick(true); // a tap while waiting checks at once
+      if (h.phase === 'pick' || h.phase === 'ask' || h.phase === 'ready') return handoffEnd(); // the same button closes it
+      return;
+    }
+    if (h && !['pick', 'ask', 'ready'].includes(h.phase)) {
+      setResult(a.id, false, 'Kadans is waiting on another handoff.');
+      render({});
+      return;
+    }
+    if (view.tell) endTell(false);
+    if (view.rename) endRename(false);
+    setConfirm(null);
+    view.picker = null;
+    view.pacer = null;
+    clearResult(a.id);
+    const ms = hoMachines();
+    view.ho = ms.length === 1 ? { id: a.id, machine: ms[0].id, machineName: ms[0].name, phase: 'ask' } : { id: a.id, phase: 'pick' };
+    handoffShow();
+  }
+  // Draws, and slides the phone's sheet up (only when motion is on), as Tell does.
+  function handoffShow() {
+    render({});
+    const h = view.ho;
+    const sh = h && tellSheet() && motionOk() ? view.tree?.kids?.find((k) => k.key === `ho:${h.id}`)?.node : null;
+    if (sh?.classList) {
+      sh.classList.add('up');
+      busy(320);
+      setTimeout(() => sh.classList.remove('up'), 340);
+    }
+  }
+  function handoffEnd() {
+    view.ho = null;
+    render({});
+  }
+  function handoffAsk() {
+    const h = view.ho;
+    const a = h && findAgent(h.id);
+    if (!h || h.phase !== 'ask') return;
+    if (!a || !canTell(a)) {
+      view.ho = null;
+      setResult(h.id, false, 'That chat can’t take a message now. Nothing was asked.');
+      render({});
+      return;
+    }
+    Object.assign(h, { phase: 'asking', sent: Date.now() });
+    send({ action: 'handoff-ask', id: h.id });
+    setTimeout(() => { if (view.ho === h && h.phase === 'asking' && Date.now() - h.sent >= HO_WAIT_MS) { view.ho = null; render({}); } }, HO_WAIT_MS + 50);
+    render({});
+  }
+  // On the normal refresh (render with agents): one status read when due, never two at once.
+  function handoffTick(force = false) {
+    const h = view.ho;
+    if (!h || h.phase !== 'writing') return;
+    const now = Date.now();
+    if (now - h.at >= HO_GIVE_UP_MS) { view.ho = null; return; }
+    if (h.checking && now - h.checking < HO_WAIT_MS) return;
+    const late = h.late || now - h.at >= HO_LATE_MS;
+    if (!force && now - (h.checkAt ?? 0) < (late ? HO_LATE_CHECK_MS : HO_CHECK_MS)) return;
+    h.checkAt = now;
+    h.checking = now;
+    send({ action: 'handoff-status', id: h.id, machine: h.machine });
+  }
+  function handoffStart() {
+    const h = view.ho;
+    if (!h || h.phase !== 'ready' || !h.repo || !IBX_ID.test(str(h.machine))) return;
+    Object.assign(h, { phase: 'starting', sent: Date.now(), line: '' });
+    send({ action: 'handoff-start', id: h.id, machine: h.machine, repo: h.repo, confirmed: true });
+    render({});
+  }
+  // The bridges' answers (one handoff at a time; the Mac's refusals carry id "").
+  function handoffResult(r) {
+    const h = view.ho;
+    if (!h || (r.id !== '' && String(r.id) !== String(h.id))) return;
+    const ok = r.ok === true;
+    if (r.action === 'handoff-ask' && h.phase === 'asking') {
+      if (ok) Object.assign(h, { phase: 'writing', at: Date.now(), checkAt: Date.now(), checking: 0, late: false });
+      else {
+        view.ho = null;
+        setResult(h.id, false, lineIn(HO_LINES, r.why) ?? lineIn(TELL_LINES, r.why) ?? 'Kadans couldn’t ask that chat.');
+      }
+    } else if (r.action === 'handoff-status' && h.phase === 'writing') {
+      h.checking = 0;
+      const s = ok && r.handoff && typeof r.handoff === 'object' ? r.handoff : null;
+      if (s?.state === 'late') h.late = true;
+      if (s?.state === 'ready' && str(s.branch)) {
+        const repos = (Array.isArray(s.repos) ? s.repos : []).filter((x) => x && IBX_ID.test(str(x.id)))
+          .map((x) => ({ id: x.id, name: clipText(x.name, 60) || x.id }));
+        Object.assign(h, { phase: 'ready', branch: clipText(s.branch, 100), repos, repo: repos.some((x) => x.id === s.repo) ? s.repo : null,
+          machineName: str(s.machine?.name) || h.machineName, line: s.why ? lineIn(INBOX_LINES, s.why) ?? 'Couldn’t read the projects there.' : '' });
+        return handoffShow();
+      }
+    } else if (r.action === 'handoff-start' && h.phase === 'starting') {
+      if (ok) {
+        const name = hoName(h);
+        view.ho = null;
+        setResult(h.id, true, `Started on ${name}`);
+        if (net.mode === 'http') { view.ibx.reading = 0; inboxRead(true); } // the Mac reads the inbox again by itself
+      } else Object.assign(h, { phase: 'ready', line: lineIn(HO_LINES, r.why) ?? fixedLine(r.why, 'Not started.') });
+    }
+    render({});
+  }
+  function handoffClick(b) {
+    const id = b.dataset.id;
+    const h = view.ho;
+    switch (b.dataset.do) {
+      case 'handoff': handoffOpen(id); return true;
+      case 'ho-machine': {
+        const m = hoMachines().find((x) => x.id === b.dataset.v);
+        if (h?.phase === 'pick' && m) Object.assign(h, { machine: m.id, machineName: m.name, phase: 'ask' });
+        handoffShow();
+        return true;
+      }
+      case 'ho-ask': handoffAsk(); return true;
+      case 'ho-repo':
+        if (h?.phase === 'ready' && h.repos.some((x) => x.id === b.dataset.v)) h.repo = b.dataset.v;
+        render({});
+        return true;
+      case 'ho-start': handoffStart(); return true;
+      case 'ho-cancel': handoffEnd(); return true;
+      default: return false;
+    }
+  }
+  // Closing the popover drops a step that is only a question (pick, step 1); a ready handoff and a wait stay.
+  function handoffHide() {
+    if (view.ho && (view.ho.phase === 'pick' || view.ho.phase === 'ask')) view.ho = null;
+  }
+  // The computer menu (several paired computers), inline under the row on both shells.
+  function handoffPick(a) {
+    const h = hoOf(a);
+    if (!h || h.phase !== 'pick') return null;
+    const id = esc(a.id);
+    return { key: `menu:ho:${a.id}`, html: `<div class="pick" data-key="menu:ho:${id}" role="menu" aria-label="Continue on"><div class="pick-h">Continue on</div>` +
+      hoMachines().map((m) => `<button role="menuitem" data-do="ho-machine" data-id="${id}" data-v="${esc(m.id)}" data-key="ho-m:${id}:${esc(m.id)}">` +
+        `<span class="nm">${esc(machineText(m.id, m.name))}</span></button>`).join('') + '</div>' };
+  }
+  // Step 1 and step 2: one line and its buttons. Inline under the row on the Mac (sheet false), the bottom sheet on the phone.
+  function handoffCard(h, sheet) {
+    if (!h || (h.phase !== 'ask' && h.phase !== 'ready')) return null;
+    const id = esc(h.id);
+    const m = esc(hoName(h));
+    const cancel = `<button class="pill quiet" data-do="ho-cancel" data-id="${id}">Cancel</button>`;
+    let line;
+    let go = '';
+    let choices = '';
+    if (h.phase === 'ask') {
+      line = 'Kadans asks this chat to write a one-page handoff note and push its branch.';
+      go = `<button class="pill blue" data-do="ho-ask" data-id="${id}">Ask</button>`;
+    } else {
+      const ready = `Handoff ready · <span class="code">${esc(h.branch)}</span>.`;
+      const repo = h.repos.find((x) => x.id === h.repo);
+      if (repo) {
+        line = `${ready} Start on ${m} · ${esc(repo.name)}?`;
+        go = `<button class="pill blue" data-do="ho-start" data-id="${id}">Start</button>`;
+      } else if (h.repos.length) {
+        line = `${ready} Which project on ${m}?`;
+        choices = `<div class="hoc">${h.repos.slice(0, HO_REPOS).map((x) => `<button class="pill quiet" data-do="ho-repo" data-id="${id}" ` +
+          `data-v="${esc(x.id)}" data-key="ho-r:${id}:${esc(x.id)}">${esc(x.name)}</button>`).join('')}</div>`;
+      } else line = `${ready} No project on ${m} matches this one. Add it in Orca there.`;
+    }
+    return { key: `ho:${h.id}`, html: `<div class="tell ho${sheet ? ' sheet' : ''}" role="group" aria-label="Continue on ${m}" data-key="ho:${id}">` +
+      `<div class="hol">${line}</div>${choices}<div class="tbar"><span class="tmsg${h.line ? ' warn' : ''}" aria-live="polite">${esc(h.line ?? '')}</span>` +
+      `${cancel}${go}</div></div>` };
+  }
+  const handoffItem = (a) => handoffPick(a) ?? (tellSheet() ? null : handoffCard(hoOf(a), false));
+  const handoffSheet = () => (tellSheet() && view.screen === 'main' ? handoffCard(view.ho, true) : null);
 
   // ---------- inbox (k52) ----------
   // One inbox for this Mac and the paired computers (k51: lib/inbox.mjs, the payload of `kadans inbox --json`). The
@@ -2894,10 +3270,11 @@
     drag.timer = null;
     if (drag.phase !== 'hold') return;
     if (!view.shown || document.hidden) { drag.phase = null; return; }
-    if (view.confirm || view.picker || view.pacer || view.tapKey) {
+    if (view.confirm || view.picker || view.pacer || view.more || view.tapKey) {
       setConfirm(null);
       view.picker = null;
       view.pacer = null;
+      view.more = null;
       view.tapKey = null;
       render({});
     }
@@ -3123,7 +3500,8 @@
   const POLL_MS = 2000;
   const TOKEN_KEY = 'kadans.token';
   const HTTP_ACTIONS = new Set(['config-set', 'stop', 'compact', 'approve', 'start', 'replace', 'pace', 'rename', 'reorder', 'agent-send',
-    'inbox', 'inbox-reply', 'task-new', 'repos', 'inbox-setup']); // k52: the inbox (k51 allows the first four on the server; k53 adds setup)
+    'inbox', 'inbox-reply', 'task-new', 'repos', 'inbox-setup', // k52: the inbox (k51 allows the first four on the server; k53 adds setup)
+    'handoff-ask', 'handoff-status', 'handoff-start']); // k54: Continue on kasa
   // net.state: 'idle' (bridge) | 'pairing' | 'live' | 'unpaired' (no token, or a 401) | 'offline' (the Mac did not answer)
   // | 'off' (503: phone access is turned off on the Mac) | 'install' (k29: iOS Safari with a code, "Add to Home Screen")
   // net.code: the pair code held back on the 'install' screen until "Use it in Safari instead" (never in the DOM).
@@ -3391,6 +3769,7 @@
   };
   function onTap(e, b) {
     if (!touchUi() || view.screen !== 'main') return false;
+    if (!b && e.target?.closest?.('.pick.more')) return true; // the sheet's title or a greyed action: nothing happens
     const row = e.target?.closest?.('.row[data-key]') ?? null;
     const key = row && !row.classList?.contains('grp') ? row.getAttribute('data-key') : null;
     if (b && key && key === view.tapKey) return false; // a button in the open row
@@ -3400,6 +3779,7 @@
     if (!b) {
       view.picker = null; // a tap elsewhere also closes an open menu
       view.pacer = null;
+      view.more = null;
       render({});
       return true;
     }
@@ -3411,11 +3791,21 @@
     if (e.target?.classList?.contains?.('tl')) return; // k49: typing a message
     const b = e.target.closest('[data-do]');
     if (onTap(e, b)) return;
+    // polish-2: any click but on More itself closes the open More menu (outside it, or on one of its actions, which then
+    // runs as it does from a row button). A greyed item or the menu's own padding keeps it open.
+    if (view.more && b?.dataset?.do !== 'more') {
+      if (!b && e.target?.closest?.('.pick.more')) return;
+      view.more = null;
+      render({});
+    }
     if (!b || b.getAttribute('aria-disabled') === 'true') return;
     if (onScreenClick(b)) return;
+    if (handoffClick(b)) return; // k54
     const id = b.dataset.id;
     const numId = id != null && /^\d+$/.test(id) ? Number(id) : id;
     switch (b.dataset.do) {
+      case 'more': moreToggle(id); break; // polish-2: opens the row's menu; nothing goes to the host
+      case 'more-cancel': break; // closed above
       case 'confirm': view.picker = null; view.pacer = null; setConfirm(id); break;
       case 'close': view.picker = null; view.pacer = null; setConfirm(id, 'close'); break;
       case 'compact': {
@@ -3652,6 +4042,13 @@
       if (key.startsWith('row:') && keyMove(key.slice(4), e.key === 'ArrowUp' ? -1 : 1)) e.preventDefault?.();
       return;
     }
+    // polish-2: the open More menu: Up / Down move through its actions (wrapping), Home / End jump; Enter or Space runs
+    // the focused one (a button's own click), Escape closes it.
+    if (view.more && view.screen === 'main' && !e.altKey && !e.metaKey && !e.ctrlKey && MORE_KEYS.has(e.key)) {
+      e.preventDefault?.();
+      moreMove(e.key);
+      return;
+    }
     if (e.key !== 'Escape') return;
     if (view.screen !== 'main') {
       if (view.screen === 'inbox' && view.tell) endTell(); // k52: an open reply closes before the screen goes back
@@ -3665,7 +4062,9 @@
       } else onScreenClick({ dataset: { do: 'back' } });
       return;
     }
-    if (view.tell) {
+    if (view.more) {
+      moreClose(); // polish-2: focus goes back to the row's More button
+    } else if (view.tell) {
       endTell(); // k49: Escape on the composer's buttons cancels it too, before anything else
     } else if (view.closeAll) {
       setCloseAll(false);
@@ -3675,12 +4074,12 @@
       const id = view.pacer;
       view.pacer = null;
       render(view.data);
-      root().querySelector(`[data-do="pace"][data-id="${CSS.escape(id)}"]`)?.focus();
+      moreFocusBack(id, 'pace'); // the button that opened it: on the row, or More (the item sat in its menu)
     } else if (view.picker) {
       const id = view.picker;
       view.picker = null;
       render(view.data);
-      root().querySelector(`[data-do="replace"][data-id="${CSS.escape(id)}"]`)?.focus();
+      moreFocusBack(id, 'replace');
     } else if (view.confirm) {
       setConfirm(null);
       render(view.data);
@@ -3778,6 +4177,8 @@
     view.tell = null;
     view.telling = null;
     tellViewport(false);
+    view.ho = null; // k54
+    view.more = null;
     view.ibx = ibxFresh();
     view.repos = null;
     view.titles.clear();
@@ -3792,6 +4193,8 @@
     if (net.mode === 'bridge' && settingsScreen() && (on !== false) !== view.shown) send({ action: on !== false ? 'settings' : 'settings-closed' });
     // k52: closing the popover drops an open reply or new task (no draft kept); opening it reads the inbox (the badge)
     if (on === false && view.screen === 'inbox') inboxDrop();
+    if (on === false) handoffHide(); // k54
+    if (on === false) view.more = null; // polish-2: the More menu does not outlive the popover
     if (on !== false && !view.shown && Date.now() - view.ibx.at >= INBOX_REOPEN_MS) inboxRead(true);
     view.shown = on !== false;
     if (!view.shown) {

@@ -41,7 +41,7 @@ function climb(now, { start, perMin, n = 12, resetIn = 120 * MIN, seven = null }
 }
 
 function statusJson(sb) {
-  const r = spawnSync(process.execPath, [BIN, 'status', '--json'], { env: sb.env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [BIN, 'status', '--json'], { env: sb.env, encoding: 'utf8', timeout: 60_000 });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }

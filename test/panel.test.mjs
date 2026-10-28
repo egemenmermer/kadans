@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { read, FNode, loadPanel, assertNoInjection, flush, fakeServer, fixture } from './panel-dom.mjs';
+import { read, FNode, loadPanel, assertNoInjection, flush, fakeServer, fixture, rowActs, allActs } from './panel-dom.mjs';
 
 test('panel: every fixture renders without injected tags or attributes', () => {
   const p = loadPanel();
@@ -191,7 +191,7 @@ test('panel: context number and compact hint for none / soon / now / null', () =
 test('panel: Compact only on idle chats with advice in a usable Orca terminal', () => {
   const p = loadPanel();
   const F = p.window.KADANS_FIXTURES;
-  const btnOn = (html, id) => new RegExp(`data-do="compact" data-id="${id}"`).test(html);
+  const btnOn = (html, id) => new RegExp(`data-do="compact" data-id="${id}"`).test(rowActs(p, id)); // polish-2: the row and its More menu
   p.window.kadans.reset();
   p.window.kadans.render(F.compact);
   let html = p.html();
@@ -216,8 +216,7 @@ test('panel: Compact only on idle chats with advice in a usable Orca terminal', 
     A('fx-0037', { status: 'idle', lastSeen: N - 9 * M, context: { ...big, advice: 'none' }, orca: orca('term_h') }),
   ];
   p.window.kadans.render({ agents: rows });
-  html = p.html();
-  assert.doesNotMatch(html, /data-do="compact"/);
+  assert.doesNotMatch(allActs(p), /data-do="compact"/);
   // a fake click on one of them opens no confirm and sends nothing
   p.tap({ do: 'compact', id: 'fx-0031' });
   assert.doesNotMatch(p.html(), /Compact this chat\?/);
@@ -275,7 +274,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   assert.match(pvText(rowHtml(html, 'fx-0021')), /^Compacting… · (\d+k context · )?Tidepool/);
   assert.doesNotMatch(rowHtml(html, 'fx-0021'), /class="tag"/);
   // no Compact anywhere while one is in flight, and a forged click is ignored
-  assert.doesNotMatch(html, /data-do="compact"/);
+  assert.doesNotMatch(allActs(p), /data-do="compact"/);
   p.tap({ do: 'compact', id: 'fx-0022' });
   p.tap({ do: 'compact-go', id: 'fx-0022' });
   assert.equal(compacts(p).length, 1);
@@ -289,7 +288,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   html = p.html();
   assert.doesNotMatch(html, /Compacting…/);
   assert.match(rowHtml(html, 'fx-0021'), /21k context/);
-  assert.match(html, /data-do="compact" data-id="fx-0022"/);
+  assert.match(rowActs(p, 'fx-0022'), /data-do="compact" data-id="fx-0022"/);
 
   // the other way: nothing changes for 90 s -> a quiet note, then Compact may be offered again
   p.document.querySelector('[data-do="compact"][data-id="fx-0022"]').click();
@@ -300,7 +299,7 @@ test('panel: one compact in flight at a time; Compacting… until the context sh
   p.window.kadans.render({ agents: smaller });
   html = p.html();
   assert.match(rowHtml(html, 'fx-0022'), /<span class="warn" title="[^"]*">Compact not confirmed<\/span>/);
-  assert.match(html, /data-do="compact" data-id="fx-0022"/);
+  assert.match(rowActs(p, 'fx-0022'), /data-do="compact" data-id="fx-0022"/);
   clock.now += 9000;
   p.window.kadans.render({ agents: smaller });
   assert.doesNotMatch(p.html(), /Compact not confirmed/);
@@ -314,7 +313,7 @@ test('panel: Suggest compact Off hides every hint and button; the segment sets c
   p.window.kadans.render(F.compact_off);
   let html = p.html();
   assert.doesNotMatch(html, /class="tag"/);
-  assert.doesNotMatch(html, /data-do="compact"/);
+  assert.doesNotMatch(allActs(p), /data-do="compact"/);
   assert.match(html, /152k context/); // the number stays
   p.tap({ do: 'compact', id: 'fx-0021' });
   assert.doesNotMatch(p.html(), /Compact this chat\?/);
@@ -353,7 +352,8 @@ test('panel: picking Off sends config-set compact.soonPct 101, and the hints go 
   p.window.kadans.render({ config: { ...F.compact.config, compact: { ...F.compact.config.compact, soonPct: 101 } } });
   p.tap({ do: 'back' });
   p.tap({ do: 'back' });
-  assert.doesNotMatch(p.html(), /class="tag"|data-do="compact"/);
+  assert.doesNotMatch(p.html(), /class="tag"/);
+  assert.doesNotMatch(allActs(p), /data-do="compact"/);
 });
 
 test('panel: a refused compact shows the CLI reason on its row for 8 s, clears the in-flight state and offers Compact again', () => {
@@ -372,7 +372,7 @@ test('panel: a refused compact shows the CLI reason on its row for 8 s, clears t
   assert.match(row, new RegExp(`class="pv"><span class="warn" title="${why}" style="[^"]*">${why}</span></div>`));
   assert.doesNotMatch(row, /Compacting…|class="tag"/);
   assert.match(row, /aria-label="Refactor the sync worker\. not compacted: That chat/);
-  assert.match(p.html(), /data-do="compact" data-id="fx-0022"/); // not in flight any more
+  assert.match(rowActs(p, 'fx-0022'), /data-do="compact" data-id="fx-0022"/); // not in flight any more
   assert.ok(timers.some((t) => t.ms <= 8100 && t.ms >= 8000), 'a re-render is scheduled when the reason expires');
   // other rows are untouched
   assert.match(rowHtml(p.html(), 'fx-0022'), /92k context/);
@@ -1527,7 +1527,7 @@ test('k32: on a phone, Rename is in the row\'s tap actions; rename and reorder g
   const { p } = arrangePanel();
   p.window.matchMedia = (q) => ({ matches: q === '(hover: none)' });
   p.window.kadans.render({});
-  assert.match(p.html(), /data-do="rename" data-id="fx-0001"/);
+  assert.match(rowActs(p, 'fx-0001'), /data-do="rename" data-id="fx-0001"/);
   p.tap({ do: 'rename', id: 'fx-0001' });
   assert.match(p.html(), /data-key="rn:fx-0001"/);
   // the phone transport allows both new actions
@@ -1540,7 +1540,8 @@ test('k32: on a phone, Rename is in the row\'s tap actions; rename and reorder g
   await new Promise((r) => setImmediate(r));
   ph.window.kadans.send({ action: 'rename', id: 'a1', title: 'New' });
   ph.window.kadans.send({ action: 'reorder', ids: ['a2', 'a1'] });
-  await new Promise((r) => setTimeout(r, 20));
+  const posted = (act) => calls.some((c) => c.url === 'api/action' && c.body?.action === act);
+  for (let i = 0; i < 600 && !(posted('rename') && posted('reorder')); i++) await new Promise((r) => setTimeout(r, 50)); // poll up to 30 s, not a fixed 20 ms
   assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'rename' && c.body.title === 'New'));
   assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'reorder' && c.body.ids.length === 2));
 });
@@ -2126,10 +2127,10 @@ test('k48: a remote row gets Close/Stop and Compact where its flags allow; the c
   set('remote:other:tab-1:1', { status: 'idle', canStop: true, canCompact: true, canSend: true }); // an idle Claude chat there
   set('remote:other:tab-2:1', { status: 'working', canStop: true, canCompact: false, canSend: false });
   p.window.kadans.render(d);
-  let idle = rowHtml(p.html(), 'remote:other:tab-1:1');
+  let idle = rowActs(p, 'remote:other:tab-1:1');
   assert.match(idle, /data-do="compact" data-id="remote:other:tab-1:1"/);
   assert.match(idle, /data-do="close" data-id="remote:other:tab-1:1"/);
-  const busy = rowHtml(p.html(), 'remote:other:tab-2:1');
+  const busy = rowActs(p, 'remote:other:tab-2:1');
   assert.match(busy, /data-do="confirm" data-id="remote:other:tab-2:1"/);
   assert.doesNotMatch(busy, /data-do="compact"/);
   for (const row of [idle, busy]) assert.doesNotMatch(row, /data-do="(pace|resume|replace|rename|open)"/); // this computer only
@@ -2171,16 +2172,16 @@ function tellPanel(opts = {}) {
 test('k49: Tell on rows that can take a message (Orca chats here, idle or working; remote rows whose flags allow send)', () => {
   const { p, data } = tellPanel();
   const html = p.html();
-  assert.match(rowHtml(html, 'fx-0501'), /data-do="tell" data-id="fx-0501"/); // working, in Orca
-  assert.match(rowHtml(html, 'fx-0502'), /data-do="tell" data-id="fx-0502"/); // idle, in Orca
-  assert.doesNotMatch(rowHtml(html, 'fx-0503'), /data-do="tell"/); // waits on a question
-  assert.match(rowHtml(html, 'remote:other:tab-1:1'), /data-do="tell" data-id="remote:other:tab-1:1"/);
+  assert.match(rowActs(p, 'fx-0501'), /data-do="tell" data-id="fx-0501"/); // working, in Orca
+  assert.match(rowActs(p, 'fx-0502'), /data-do="tell" data-id="fx-0502"/); // idle, in Orca
+  assert.doesNotMatch(rowActs(p, 'fx-0503'), /data-do="tell"/); // waits on a question
+  assert.match(rowActs(p, 'remote:other:tab-1:1'), /data-do="tell" data-id="remote:other:tab-1:1"/);
   const d = data();
   d.agents[0].orca = null; // not in an Orca terminal Kadans knows
   d.agents[3].canSend = false;
   p.window.kadans.render(d);
-  assert.doesNotMatch(rowHtml(p.html(), 'fx-0501'), /data-do="tell"/);
-  assert.doesNotMatch(rowHtml(p.html(), 'remote:other:tab-1:1'), /data-do="tell"/);
+  assert.doesNotMatch(rowActs(p, 'fx-0501'), /data-do="tell"/);
+  assert.doesNotMatch(rowActs(p, 'remote:other:tab-1:1'), /data-do="tell"/);
 });
 
 test('k49: Cmd-Enter sends agent-send {id, text}; the field is empty after; the row says Sending…, then Sent', () => {

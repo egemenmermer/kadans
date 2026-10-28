@@ -52,6 +52,17 @@ function raw(path, data, { end = false } = {}) {
   });
 }
 const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+const LONG = { timeoutMs: 30_000 }; // a probe deadline a loaded machine cannot hit
+// Condition polling: returns the first value `ok` accepts, as soon as it holds (deadline 30 s).
+async function until(fn, ok) {
+  let v;
+  for (let i = 0; i < 600; i++) {
+    v = await fn();
+    if (ok(v)) return v;
+    await tick(50);
+  }
+  return v;
+}
 
 test('k53 hub: socket and key 0600, owner only; a ping answers; bad, oversized, extra or concurrent requests are refused; request text never on disk', withRoot(async (home, root) => {
   let bound = true;
@@ -67,9 +78,9 @@ test('k53 hub: socket and key 0600, owner only; a ping answers; bad, oversized, 
     assert.equal(st.uid, process.getuid());
     assert.equal(statSync(join(home, HUB_KEY)).mode & 0o777, 0o600);
     assert.equal(statSync(home).mode & 0o077, 0);
-    assert.deepEqual(await hubStatus(home), { on: true, bound: true });
+    assert.deepEqual(await hubStatus(home, LONG), { on: true, bound: true });
     bound = false;
-    assert.deepEqual(await hubStatus(home), { on: true, bound: false }, 'bound is asked on every ping');
+    assert.deepEqual(await hubStatus(home, LONG), { on: true, bound: false }, 'bound is asked on every ping');
     bound = true;
     const key = readFileSync(join(home, HUB_KEY), 'utf8');
     const refused = '{"ok":false,"why":"refused"}\n';
@@ -87,12 +98,11 @@ test('k53 hub: socket and key 0600, owner only; a ping answers; bad, oversized, 
     const held = net.createConnection(sock);
     held.on('error', () => {});
     await new Promise((r) => held.on('connect', r));
-    await tick(50);
-    assert.equal(await raw(sock, `${JSON.stringify({ op: 'ping', key })}\n`), '{"ok":false,"why":"busy"}\n');
+    // the hub registers the held connection some time after connect: poll until it answers busy
+    assert.equal(await until(() => raw(sock, `${JSON.stringify({ op: 'ping', key })}\n`), (r) => r.includes('busy')), '{"ok":false,"why":"busy"}\n');
     assert.deepEqual(await hubStatus(home), { on: false, bound: false });
     held.destroy();
-    await tick(50);
-    assert.deepEqual(await hubStatus(home), { on: true, bound: true });
+    assert.deepEqual(await until(() => hubStatus(home, LONG), (s) => s.on), { on: true, bound: true }); // the hub notices the close some time later
     // a client trusts only a socket and key that are this user's alone
     chmodSync(sock, 0o660);
     assert.deepEqual(await hubStatus(home), { on: false, bound: false });
@@ -131,7 +141,7 @@ function hubSandbox(root) {
   mkdirSync(fakeDir);
   writeFileSync(join(fakeDir, 'orca'), FAKE_ORCA, { mode: 0o755 });
   const home = join(root, 'k');
-  const env = { PATH: process.env.PATH, HOME: join(root, 'h'), KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'h', 'c'), KADANS_ORCA_BIN: join(fakeDir, 'orca') };
+  const env = { PATH: process.env.PATH, HOME: join(root, 'h'), KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'h', 'c'), KADANS_ORCA_BIN: join(fakeDir, 'orca'), KADANS_ORCA_TIMEOUT_MS: '30000', KADANS_HUB_PROBE_MS: '30000' }; // a loaded machine must not cut the fake orca or the probe
   const calls = () => (existsSync(join(fakeDir, 'calls.log')) ? readFileSync(join(fakeDir, 'calls.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
   const start = async () => {
     const p = spawn(process.execPath, [BIN, 'inbox', 'hub'], { env: { ...env, ORCA_TERMINAL_HANDLE: COORD, ORCA_PANE_KEY: 'pane-1' }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -139,7 +149,7 @@ function hubSandbox(root) {
     let err = '';
     p.stdout.on('data', (d) => { out += d; });
     p.stderr.on('data', (d) => { err += d; });
-    for (let i = 0; i < 100 && !out.includes('\n') && p.exitCode === null; i++) await tick(100);
+    for (let i = 0; i < 400 && !out.includes('\n') && p.exitCode === null; i++) await tick(100); // up to 40 s: a fresh node process, slow on a loaded machine
     return { p, out: () => out, err: () => err, exit: new Promise((r) => p.once('exit', (code, sig) => r({ code, sig }))) };
   };
   return { home, env, calls, start };
@@ -149,7 +159,7 @@ test('k53 hub process: binds from its own tab, prints one line, ends cleanly on 
   const sb = hubSandbox(root);
   // refused outside an Orca terminal and inside an agent chat: no orca call, no socket
   for (const extra of [{}, { ORCA_TERMINAL_HANDLE: COORD, CLAUDECODE: '1' }, { ORCA_TERMINAL_HANDLE: COORD, ORCA_AGENT_SESSION_ID: 's' }, { ORCA_TERMINAL_HANDLE: '--from' }]) {
-    const r = spawnSync(process.execPath, [BIN, 'inbox', 'hub'], { env: { ...sb.env, ...extra }, encoding: 'utf8', timeout: 10000 });
+    const r = spawnSync(process.execPath, [BIN, 'inbox', 'hub'], { env: { ...sb.env, ...extra }, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 2);
     assert.equal(r.stderr, `kadans: ${HUB_ERR.where}\n`);
   }
@@ -158,11 +168,11 @@ test('k53 hub process: binds from its own tab, prints one line, ends cleanly on 
     const h = await sb.start();
     assert.equal(h.out(), `${HUB_LINE}\n`);
     assert.equal(h.err(), '');
-    assert.deepEqual(await hubStatus(sb.home), { on: true, bound: true });
+    assert.deepEqual(await hubStatus(sb.home, LONG), { on: true, bound: true });
     // typed into the tab (Orca or anyone): read and dropped, never echoed, written or acted on
     h.p.stdin.write(`${SECRET}\norca orchestration check\n`);
     await tick(100);
-    assert.deepEqual(await hubStatus(sb.home), { on: true, bound: true });
+    assert.deepEqual(await hubStatus(sb.home, LONG), { on: true, bound: true });
     h.p.kill(sig);
     const end = await h.exit;
     assert.equal(end.code, 0, `${sig}: exit code`);
@@ -308,3 +318,25 @@ test('k53 phone: inbox-setup is on the allow-list with fixed arguments (nothing 
   const plan = planAction({ action: 'inbox-setup', id: '--worktree', text: SECRET, command: 'rm -rf ~', machine: 'env-kasa' }, new Set());
   assert.deepEqual(plan, { action: 'inbox-setup', id: '', args: ['inbox', 'setup'], timeout: 45_000 });
 });
+
+test('fix-7 L2: two hubs started at once end with one live, bound hub; the loser touches neither the key nor the bind', withRoot(async (home) => {
+  const binds = [];
+  const slow = (n) => async () => { binds.push(n); await tick(400); return { ok: true }; };
+  const [a, b] = await Promise.all([
+    startHub(home, { bind: slow(1), isBound: () => true }),
+    startHub(home, { bind: slow(2), isBound: () => true }),
+  ]);
+  const winner = a.ok ? a : b;
+  const loser = a.ok ? b : a;
+  try {
+    assert.equal([a.ok, b.ok].filter(Boolean).length, 1, JSON.stringify([a.why, b.why]));
+    assert.equal(loser.ok, false);
+    assert.equal(binds.length, 1, 'only the winner bound the Run');
+    assert.equal(winner.bound, true);
+    assert.ok(existsSync(join(home, HUB_KEY)), 'the key file stays');
+    assert.deepEqual(await hubStatus(home), { on: true, bound: true });
+  } finally {
+    await winner.stop();
+  }
+  assert.ok(!existsSync(join(home, HUB_KEY)));
+}));

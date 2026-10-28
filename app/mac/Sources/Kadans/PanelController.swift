@@ -242,7 +242,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
 
     // MARK: data
 
-    /// Runs `status --json` and `agents --json` off the main thread and renders the result. Never overlaps itself.
+    /// Runs `live --json` (status and agents in one node start, perf-1) off the main thread and renders the result. Never overlaps itself.
     /// full: also `config get --json` (Settings) and `install --json` (hook card); on open, Settings and after actions,
     /// not on the 5 s tick. All four are read-only and take no page data.
     func refresh(full: Bool = false, completion: (() -> Void)? = nil) {
@@ -260,13 +260,7 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
         if full && settingsOpen { computers?.reload { [weak self] in self?.pushComputers() } }
         DispatchQueue.global(qos: .utility).async {
             let devices = wantDevices ? Phone.fetchDevices() : nil
-            let s = CLI.run(["status", "--json"])
-            let a = CLI.run(["agents", "--json"])
-            if !s.ok { log("status --json failed (code \(s.code), timeout \(s.timedOut)): \(s.err)") }
-            if !a.ok { log("agents --json failed (code \(a.code), timeout \(a.timedOut)): \(a.err)") }
-            let status = s.json as? [String: Any]
-            if s.ok && status == nil { log("status --json: output is not a JSON object") }
-            let agents: Any = a.json ?? []
+            let (status, agents) = Self.readLive()
             var extra: [String: Any] = [:]
             if full {
                 let c = CLI.run(["config", "get", "--json"])
@@ -298,6 +292,24 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 }
             }
         }
+    }
+
+    /// perf-1: `live --json` = {status, agents} in one node start; an older CLI without `live`: the two commands.
+    private static func readLive() -> ([String: Any]?, Any) {
+        let l = CLI.run(["live", "--json"], timeout: 15)
+        if let o = l.json as? [String: Any], o["agents"] != nil {
+            let status = o["status"] as? [String: Any]
+            if status == nil { log("live --json: status is not a JSON object") }
+            return (status, o["agents"] ?? [])
+        }
+        if !l.ok { log("live --json failed (code \(l.code), timeout \(l.timedOut)): \(l.err.prefix(200))") }
+        let s = CLI.run(["status", "--json"])
+        let a = CLI.run(["agents", "--json"])
+        if !s.ok { log("status --json failed (code \(s.code), timeout \(s.timedOut)): \(s.err)") }
+        if !a.ok { log("agents --json failed (code \(a.code), timeout \(a.timedOut)): \(a.err)") }
+        let status = s.json as? [String: Any]
+        if s.ok && status == nil { log("status --json: output is not a JSON object") }
+        return (status, a.json ?? [])
     }
 
     /// `kadans install --json` (preview only, never writes). nil when it fails (for example a broken settings.json).
@@ -443,12 +455,14 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
     /// k48: a message for `agent send`, as lib/text.mjs messageText: CRLF and CR become LF, whitespace trimmed at both ends,
     /// then 1 to 4000 unicode scalars (JS code points), no control character but newline (no tab), no bidi control,
     /// U+2028/2029 or U+FEFF, and no "-" (orca would read it as a flag), "!" (shell mode), "/" (a slash command) or "#" (a
-    /// memory note) at the start (k49: as lib/text.mjs). nil otherwise; never says why.
+    /// memory note) at the start (k49: as lib/text.mjs; "!" also at the start of any later line). nil otherwise; never says why.
     static func messageText(_ v: Any?) -> String? {
         guard let raw = v as? String, raw.utf16.count <= 4 * 4000 + 64 else { return nil }
         let t = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !["-", "!", "/", "#"].contains(where: { t.hasPrefix($0) }), t.unicodeScalars.count <= 4000 else { return nil }
+        // rev-2 L8: "!" is refused at the start of any later line too (as lib/text.mjs).
+        if t.split(separator: "\n", omittingEmptySubsequences: false).contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("!") }) { return nil }
         for u in t.unicodeScalars {
             let c = u.value
             if c == 0x0A { continue }
@@ -496,6 +510,30 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 if action == "task-new", r.code == 0, Self.inboxId(firstLine) != nil { p["dispatchId"] = firstLine }
                 if let js = BridgeResult.script(p) { self.evaluate(js) }
                 if action == "inbox-reply" || action == "task-new" || action == "inbox-setup" { self.inboxRun("inbox", id: "", args: ["inbox", "--json"], timeout: 20, key: "inbox") }
+            }
+        }
+    }
+
+    /// k54: one handoff action (`kadans handoff <id> --ask | --status --json | --start ...`) off the main thread. Logs the
+    /// exit code only; the why line comes from stderr only. The status JSON rides in the result under `handoff`; a started
+    /// task adds `dispatchId` and re-reads the inbox (the task then shows under Running).
+    private func handoffRun(_ action: String, id: String, args: [String], timeout: TimeInterval) {
+        log("handoff action: \(action)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = CLI.run(args, timeout: timeout)
+            log("handoff action \(action): code \(r.code)\(r.timedOut ? " (timed out)" : "")")
+            let ok = r.code == 0 && !r.timedOut
+            let parsed: Any? = (ok && action == "handoff-status") ? try? JSONSerialization.jsonObject(with: r.out) : nil
+            let firstLine = String(decoding: r.out, as: UTF8.self).split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            DispatchQueue.main.async {
+                var p = BridgeResult.payload(action: action, id: id, code: r.code, out: "", err: r.err, timedOut: r.timedOut)
+                if action == "handoff-status" {
+                    if let parsed { p["handoff"] = parsed } else if ok { p["ok"] = false; p["why"] = "Kadans gave an answer the panel cannot read" }
+                }
+                if action == "handoff-start", ok, Self.inboxId(firstLine) != nil { p["dispatchId"] = firstLine }
+                if let js = BridgeResult.script(p) { self.evaluate(js) }
+                if action == "handoff-start" { self.inboxRun("inbox", id: "", args: ["inbox", "--json"], timeout: 20, key: "inbox") }
+                if action == "handoff-ask" { self.refresh(full: true) }
             }
         }
     }
@@ -630,6 +668,34 @@ final class PanelController: NSViewController, WKNavigationDelegate, WKScriptMes
                 args += ["--effort", effort]
             }
             inboxRun("task-new", id: machine, args: args, stdin: text, timeout: 170)
+        // k54: "Continue on kasa" (lib/handoff.mjs). A chat on this Mac from the latest agents list only (never a remote:
+        // row). Nothing but ids goes to the CLI: Kadans types its own fixed instruction (ask) and builds the task text itself
+        // (start). Start runs only with confirmed: true, which the page sets after its second confirm line.
+        case "handoff-ask", "handoff-status", "handoff-start":
+            guard let id = agentId(body["id"]), !id.hasPrefix("remote:") else {
+                log("ignored \(action): not a chat on this Mac in the current agents list")
+                if let js = BridgeResult.script(["action": action, "id": "", "ok": false, "why": "refused: that was not accepted"]) { evaluate(js) }
+                return
+            }
+            if action == "handoff-ask" { return handoffRun(action, id: id, args: ["handoff", id, "--ask"], timeout: 30) }
+            var machine: String? = nil
+            if let m = body["machine"], !(m is NSNull) {
+                guard let mm = Self.inboxId(m), mm != "local" else {
+                    log("ignored \(action): machine not accepted")
+                    if let js = BridgeResult.script(["action": action, "id": id, "ok": false, "why": "refused: that was not accepted"]) { evaluate(js) }
+                    return
+                }
+                machine = mm
+            }
+            if action == "handoff-status" {
+                return handoffRun(action, id: id, args: ["handoff", id, "--status", "--json"] + (machine.map { ["--to", $0] } ?? []), timeout: 45)
+            }
+            guard body["confirmed"] as? Bool == true, let machine, let repo = Self.repoArg(body["repo"]) else {
+                log("ignored handoff-start: not confirmed, or machine or repo not accepted")
+                if let js = BridgeResult.script(["action": action, "id": id, "ok": false, "why": "refused: that was not accepted"]) { evaluate(js) }
+                return
+            }
+            handoffRun(action, id: id, args: ["handoff", id, "--start", "--to", machine, "--repo", repo, "--yes"], timeout: 170)
         case "approve":
             guard let task = Self.taskId(body["id"]) else { log("ignored approve: id is not a task number"); return }
             runThenRefresh(["approve", String(task)])

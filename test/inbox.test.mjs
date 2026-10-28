@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ERR, INBOX_FILE, PREVIEW_MAX, inboxCaller, readInbox, readInboxState, replyTo, sendFollowUp, setupInbox, startArgs, startTask } from '../lib/inbox.mjs';
+import { ERR, INBOX_FILE, PREVIEW_MAX, inboxCaller, mapInbox, readInbox, readInboxState, replyTo, sendFollowUp, setupInbox, startArgs, startTask } from '../lib/inbox.mjs';
 
 const BIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'kadans.mjs');
 // k53: mutations run only while the inbox hub answers; the lib tests give them a hub that is on and bound.
@@ -258,7 +258,7 @@ test('k51 inboxCaller: no ORCA_* variable (identity, attestation) reaches the or
     const out = join(root, 'env.txt');
     const fake = join(root, 'orca');
     writeFileSync(fake, `#!/bin/sh\nenv > "${out}"\necho '{"ok":true,"result":{}}'\n`, { mode: 0o755 });
-    const call = inboxCaller({ PATH: process.env.PATH, KADANS_ORCA_BIN: fake, KEEP_ME: '1', ORCA_TERMINAL_HANDLE: 'term_chat', ORCA_AGENT_SESSION_ID: 'sess',
+    const call = inboxCaller({ PATH: process.env.PATH, KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000', KEEP_ME: '1', ORCA_TERMINAL_HANDLE: 'term_chat', ORCA_AGENT_SESSION_ID: 'sess',
       ORCA_AGENT_SESSION_SPAWN_TOKEN: 'tok', ORCA_PANE_KEY: 'p', ORCA_AGENT_LAUNCH_TOKEN: 'lt', ORCA_WORKTREE_ID: 'w' });
     return call(['orchestration', 'inbox', '--json'], 5000).then((r) => {
       assert.equal(r.ok, true);
@@ -308,10 +308,10 @@ function cliSandbox() {
   writeFileSync(join(fakeDir, 'fixtures.json'), JSON.stringify({ envs: ENVS, reposLocal: REPOS_LOCAL, reposKasa: REPOS_KASA, messages: MESSAGES, tasks: TASKS, runs: [{ id: RUN, legacy: 0 }], run: RUN }));
   const fake = join(fakeDir, 'orca');
   writeFileSync(fake, FAKE_ORCA, { mode: 0o755 });
-  const env = { PATH: process.env.PATH, HOME: join(root, 'home'), KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'home', 'claude'), KADANS_ORCA_BIN: fake };
+  const env = { PATH: process.env.PATH, HOME: join(root, 'home'), KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'home', 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000', KADANS_HUB_PROBE_MS: '30000' }; // a loaded machine must not cut the fake orca or the hub probe
   const seen = [];
   const cli = (args, input, extra = {}) => {
-    const r = spawnSync(process.execPath, [BIN, ...args], { env: { ...env, ...extra }, encoding: 'utf8', input, timeout: 20000 });
+    const r = spawnSync(process.execPath, [BIN, ...args], { env: { ...env, ...extra }, encoding: 'utf8', input, timeout: 60000 });
     seen.push(r.stdout, r.stderr);
     return r;
   };
@@ -345,7 +345,7 @@ test('k51 cli: inbox, setup, task new / reply from stdin only, repos; text never
     hub = spawn(process.execPath, [BIN, 'inbox', 'hub'], { env: { ...sb.env, ORCA_TERMINAL_HANDLE: COORD }, stdio: ['ignore', 'pipe', 'pipe'] });
     let line = '';
     hub.stdout.on('data', (d) => { line += d; });
-    for (let i = 0; i < 100 && !line.includes('\n'); i++) await new Promise((ok) => setTimeout(ok, 100));
+    for (let i = 0; i < 400 && !line.includes('\n'); i++) await new Promise((ok) => setTimeout(ok, 100)); // up to 40 s: a fresh node process, slow on a loaded machine
     assert.equal(line, 'Kadans inbox: keep this tab open. Close it to turn the inbox off.\n');
     assert.deepEqual(sb.calls().at(-1).slice(0, 2), ['orchestration', 'run-create']);
     assert.deepEqual(sb.calls().at(-1).slice(-3), ['--from', COORD, '--json']);
@@ -412,4 +412,35 @@ test('k51 cli: inbox, setup, task new / reply from stdin only, repos; text never
     }
     sb.done();
   }
+});
+
+test('fix-7 L3: a message type that is an Object.prototype name maps to a plain message', () => {
+  const msg = (type, id) => ({ id, run_id: RUN, to_handle: `run:${RUN}`, type, subject: 's', body: 'b', created_at: '2026-10-27T10:00:00Z' });
+  const items = mapInbox({ runId: RUN, messages: [msg('constructor', 'msg_c'), msg('__proto__', 'msg_p'), msg('toString', 'msg_t')], tasks: [], state: { tasks: {} }, names: new Map(), ready: true });
+  assert.equal(items.length, 3);
+  for (const it of items) {
+    assert.equal(it.kind, 'message');
+    assert.equal(it.title, 'Message');
+    assert.equal(it.status, 'new');
+    assert.equal(it.canReply, false);
+  }
+});
+
+test('fix-7 L7: from_handle decides the task and dispatch; payload ids naming another worker\'s task are ignored', () => {
+  const tasks = [
+    { id: 'task_a', run_id: RUN, assignee_handle: 'term_a', dispatch_id: 'disp_a', task_title: 'Task A', status: 'running' },
+    { id: 'task_b', run_id: RUN, assignee_handle: 'term_b', dispatch_id: 'disp_b', task_title: 'Task B', status: 'running' },
+  ];
+  const state = { tasks: { disp_a: { taskId: 'task_a', machine: 'local', at: 1 }, disp_b: { taskId: 'task_b', machine: 'env-kasa', at: 2 } } };
+  const mk = (id, from, payload) => ({ id, run_id: RUN, to_handle: `run:${RUN}`, from_handle: from, type: 'question', subject: 's', body: 'b', created_at: '2026-10-27T10:00:00Z', payload: JSON.stringify(payload) });
+  const messages = [
+    mk('msg_evil', 'term_a', { taskId: 'task_b', dispatchId: 'disp_b' }),
+    mk('msg_ok', 'term_b', { taskId: 'task_b', dispatchId: 'disp_b' }),
+    mk('msg_nohandle', 'term_zzz', { taskId: 'task_b', dispatchId: 'disp_b' }),
+  ];
+  const items = mapInbox({ runId: RUN, messages, tasks, state, names: new Map([['env-kasa', 'kasa']]), ready: true });
+  const by = (id) => items.find((i) => i.id === id);
+  assert.deepEqual([by('msg_evil').title, by('msg_evil').dispatchId, by('msg_evil').machine], ['Task A', 'disp_a', 'local']);
+  assert.deepEqual([by('msg_ok').title, by('msg_ok').dispatchId, by('msg_ok').machine], ['Task B', 'disp_b', 'env-kasa']);
+  assert.deepEqual([by('msg_nohandle').title, by('msg_nohandle').dispatchId], ['Question', null]);
 });

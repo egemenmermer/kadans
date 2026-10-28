@@ -155,7 +155,7 @@ function cliSandbox(config) {
     writeFileSync(join(d, 'samples.jsonl'), s.map((x) => `${JSON.stringify(x)}\n`).join(''));
   };
   const run = (args) => {
-    const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 20_000 });
+    const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 60_000 });
     return { code: r.status, out: r.stdout, err: r.stderr };
   };
   const calls = () => (existsSync(mark) ? readFileSync(mark, 'utf8').trim().split('\n') : []);

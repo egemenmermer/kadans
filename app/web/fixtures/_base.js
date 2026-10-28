@@ -26,5 +26,11 @@ window.KF = (function () {
     agent('fx-0003', { project: 'Fernway', model: 'claude-sonnet-4-6', tokens: 12000, startedAt: N - 3 * M,
       firstPrompt: 'Clean up unused CSS' }),
   ];
-  return { N, M, lim, acct, queue, status, agent, base };
+  // polish-2: a row action by its data-do, wherever it sits: More opens the row's menu first (a click on a button on the
+  // row itself then closes that menu again and runs as before).
+  const act = (doc, what, id) => {
+    doc.querySelector(`[data-do="more"][data-id="${id}"]`)?.click();
+    doc.querySelector(`[data-do="${what}"][data-id="${id}"]`)?.click();
+  };
+  return { N, M, lim, acct, queue, status, agent, base, act };
 })();

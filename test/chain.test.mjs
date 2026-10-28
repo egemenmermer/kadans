@@ -34,7 +34,7 @@ function script(sb, name, body) {
 }
 
 function statusline(sb, input) {
-  const r = spawnSync(process.execPath, [BIN, 'statusline'], { input, env: sb.env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [BIN, 'statusline'], { input, env: sb.env, encoding: 'utf8', timeout: 60_000 });
   return { code: r.status, out: r.stdout };
 }
 

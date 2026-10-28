@@ -246,7 +246,7 @@ test('k52: the phone page sends the five inbox actions over HTTP and reads the i
   assert.ok(calls.some((c) => c.url === 'api/action' && c.body?.action === 'inbox'));
   assert.match(ph.html(), /Make the rain sound loop without a gap/, 'the answer carried the inbox');
   ph.tap({ do: 'reply', id: 'msg_q1' });
-  assert.match(ph.html(), /class="tell sheet"/);
+  assert.match(ph.html(), /class="tell sheet( up)?"/); // "up" is the sheet's slide-in class, added once motion is on
   assert.match(ph.html(), /Tap the mic on the keyboard to speak/);
   for (const m of [{ action: 'inbox-reply', id: 'msg_q1', text: ANSWER }, { action: 'repos', machine: 'env-0001' },
     { action: 'task-new', machine: 'env-0001', repo: 'id:repo-0001', text: TASK, confirmed: true }, { action: 'inbox-setup' }]) ph.window.kadans.send(m);

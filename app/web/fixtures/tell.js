@@ -16,7 +16,7 @@
   ];
   const base = () => ({ status: KF.status(), agents: agents() });
   const host = (doc) => (doc && doc.defaultView) || window;
-  const open = (doc, id) => doc.querySelector(`[data-do="tell"][data-id="${id}"]`)?.click();
+  const open = (doc, id) => KF.act(doc, 'tell', id);
   // Types into the open field and lets the panel see it (the counter, the hint, the height).
   const type = (doc, text) => {
     const f = doc.querySelector('textarea.tl');

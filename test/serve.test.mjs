@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CODE_TTL_MS, base32, listDevices, newPairCode, revokeDevice, sha256 } from '../lib/phone.mjs';
-import { ALLOWED_ACTIONS, STATIC_FILES, agentIds, cliRunner, createPhoneServer, manifestFor, pickHost, planAction, titleArg, why } from '../lib/serve.mjs';
+import { ALLOWED_ACTIONS, SENDS, STATIC_FILES, agentIds, cliRunner, createPhoneServer, manifestFor, pickHost, planAction, titleArg, why } from '../lib/serve.mjs';
 
 const BIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'kadans.mjs');
 
@@ -434,7 +434,7 @@ test('cliRunner: argument array, no shell, timeout', async () => {
   const script = join(dir, 'echo.mjs');
   writeFileSync(script, "if (process.argv[2] === 'hang') setTimeout(() => {}, 60000); else process.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
   const run = cliRunner({ bin: script });
-  const r = await run(['config', 'set', 'notify', '$(touch x); `id` | true']);
+  const r = await run(['config', 'set', 'notify', '$(touch x); `id` | true'], { timeout: 60_000 }); // a fresh node process: slow on a loaded machine, so no 10 s default
   assert.deepEqual(JSON.parse(r.out), ['config', 'set', 'notify', '$(touch x); `id` | true']);
   assert.equal(r.code, 0);
   assert.ok(!existsSync(join(dir, 'x')));
@@ -446,11 +446,11 @@ test('cliRunner: argument array, no shell, timeout', async () => {
 test('cli: serve refuses while phone is off; serve, pair --json, devices, revoke, SIGTERM', async () => {
   const home = mkdtempSync(join(tmpdir(), 'kadans-cli-serve-'));
   const env = { ...process.env, KADANS_HOME: home, KADANS_ORCA: '0', CLAUDE_CONFIG_DIR: join(home, 'claude') };
-  const off = spawnSync(process.execPath, [BIN, 'serve', '--host', '127.0.0.1', '--port', '0'], { env, encoding: 'utf8', timeout: 10_000 });
+  const off = spawnSync(process.execPath, [BIN, 'serve', '--host', '127.0.0.1', '--port', '0'], { env, encoding: 'utf8', timeout: 60_000 });
   assert.equal(off.status, 2);
   assert.match(off.stderr, /phone control is off/);
-  assert.equal(spawnSync(process.execPath, [BIN, 'pair'], { env, encoding: 'utf8' }).status, 2, 'pair needs a running serve');
-  assert.equal(spawnSync(process.execPath, [BIN, 'config', 'set', 'phone', 'true'], { env, encoding: 'utf8' }).status, 0);
+  assert.equal(spawnSync(process.execPath, [BIN, 'pair'], { env, encoding: 'utf8', timeout: 60_000 }).status, 2, 'pair needs a running serve');
+  assert.equal(spawnSync(process.execPath, [BIN, 'config', 'set', 'phone', 'true'], { env, encoding: 'utf8', timeout: 60_000 }).status, 0);
   const child = spawn(process.execPath, [BIN, 'serve', '--host', '127.0.0.1', '--port', '0'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     const line = await new Promise((done, fail) => {
@@ -467,34 +467,49 @@ test('cli: serve refuses while phone is off; serve, pair --json, devices, revoke
     assert.equal(info.url, `http://127.0.0.1:${info.port}`);
     assert.equal(info.pid, child.pid);
     assert.equal(statSync(join(home, 'serve.json')).mode & 0o777, 0o600);
-    const p = spawnSync(process.execPath, [BIN, 'pair', '--json'], { env, encoding: 'utf8' });
+    const p = spawnSync(process.execPath, [BIN, 'pair', '--json'], { env, encoding: 'utf8', timeout: 60_000 });
     assert.equal(p.status, 0, p.stderr);
     const pr = JSON.parse(p.stdout);
     assert.match(pr.url, new RegExp(`^http://127\\.0\\.0\\.1:${info.port}/#pair=[A-Z2-7]{26}$`));
     const code = pr.url.split('#pair=')[1];
-    const post = (path, body, token) => fetch(`${info.url}${path}`, {
-      method: body ? 'POST' : 'GET',
-      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
+    // A fresh connection per request (agent: false, Connection: close). fetch keeps sockets alive, and the server drops an
+    // idle one after 5 s: the node CLI spawns between the requests can take that long on a loaded machine, so a reused
+    // socket could be reset mid-request ("fetch failed").
+    const post = (path, body, token) => new Promise((done, fail) => {
+      const req = request(`${info.url}${path}`, {
+        method: body ? 'POST' : 'GET', agent: false,
+        headers: { 'content-type': 'application/json', connection: 'close', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      }, (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { text += c; });
+        res.on('end', () => done({ status: res.statusCode, json: async () => JSON.parse(text) }));
+      });
+      req.on('error', fail);
+      req.end(body ? JSON.stringify(body) : undefined);
     });
     const r = await post('/api/pair', { code, name: 'Test phone' });
     assert.equal(r.status, 200);
     const { token } = await r.json();
-    const list = JSON.parse(spawnSync(process.execPath, [BIN, 'devices', '--json'], { env, encoding: 'utf8' }).stdout);
+    const list = JSON.parse(spawnSync(process.execPath, [BIN, 'devices', '--json'], { env, encoding: 'utf8', timeout: 60_000 }).stdout);
     assert.equal(list.length, 1);
     assert.equal(list[0].name, 'Test phone');
-    const rv = spawnSync(process.execPath, [BIN, 'devices', 'revoke', list[0].id], { env, encoding: 'utf8' });
+    const rv = spawnSync(process.execPath, [BIN, 'devices', 'revoke', list[0].id], { env, encoding: 'utf8', timeout: 60_000 });
     assert.equal(rv.status, 0);
     assert.equal((await post('/api/state', null, token)).status, 401, 'revoked: refused before anything runs');
-    assert.equal(spawnSync(process.execPath, [BIN, 'config', 'set', 'phone', 'false'], { env, encoding: 'utf8' }).status, 0);
+    assert.equal(spawnSync(process.execPath, [BIN, 'config', 'set', 'phone', 'false'], { env, encoding: 'utf8', timeout: 60_000 }).status, 0);
     assert.equal((await post('/api/pair', { code, name: 'x' })).status, 503, 'phone off: the API closes even if serve still runs');
-    assert.equal(spawnSync(process.execPath, [BIN, 'devices', 'revoke', list[0].id], { env, encoding: 'utf8' }).status, 2);
+    assert.equal(spawnSync(process.execPath, [BIN, 'devices', 'revoke', list[0].id], { env, encoding: 'utf8', timeout: 60_000 }).status, 2);
     const exited = new Promise((done) => child.on('exit', (c, sig) => done({ c, sig })));
     child.kill('SIGTERM');
     assert.deepEqual(await exited, { c: 0, sig: null });
     assert.equal(existsSync(join(home, 'serve.json')), false);
     for (const f of readdirSync(home)) {
-      if (statSync(join(home, f)).isFile()) assert.ok(!readFileSync(join(home, f), 'utf8').includes(token), f);
+      let text = null;
+      try {
+        if (statSync(join(home, f)).isFile()) text = readFileSync(join(home, f), 'utf8');
+      } catch { /* a temp file renamed away between readdir and read */ }
+      if (text !== null) assert.ok(!text.includes(token), f);
     }
   } finally {
     child.kill('SIGKILL');
@@ -678,5 +693,27 @@ test('k51 phone: inbox, inbox-reply, task-new, repos are allowed for paired devi
   } finally {
     await s.close();
     rmSync(s.home, { recursive: true, force: true });
+  }
+});
+
+test('fix-7 L4: compact, start and replace count against the phone send limit (the plain 429 line)', async () => {
+  assert.ok(['compact', 'start', 'replace'].every((a) => SENDS.has(a)));
+  const s = await boot({ outputs: { 'agents --json': ok(AGENTS) } });
+  try {
+    const { token } = await s.pair();
+    // six sends a minute per device, shared by every kind: three compacts, three starts, then the seventh waits
+    for (const body of [{ action: 'compact', id: 'a1' }, { action: 'start', id: 1 }, { action: 'compact', id: 'a1' },
+      { action: 'start', id: 2 }, { action: 'compact', id: 'a1' }, { action: 'start', id: 3 }]) {
+      s.clock.t += 1000;
+      const x = await s.req('POST', '/api/action', { body, token });
+      assert.equal(x.status, 200, `${x.text}`);
+    }
+    for (const body of [{ action: 'compact', id: 'a1' }, { action: 'start', id: 4 }, { action: 'replace', id: 'a1', task: 5 }]) {
+      s.clock.t += 1000;
+      const busy = await s.req('POST', '/api/action', { body, token });
+      assert.deepEqual([busy.status, busy.json.why], [429, 'Too many messages; wait a minute'], body.action);
+    }
+  } finally {
+    await s.close();
   }
 });

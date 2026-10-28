@@ -73,7 +73,7 @@ test('readRegistry never opens the *.key files and keeps only pid, sessionId, st
   const fifo = join(dir, 'sessions', '31.00000000-0000-4000-8000-000000000000.key');
   assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
   const code = `import(${JSON.stringify(LIB)}).then(({ readRegistry }) => { const r = readRegistry([${JSON.stringify(dir)}], () => ({ start: ${START}, comm: 'claude', paneKey: null, handle: null })); console.log(JSON.stringify([[...r.live], r.hosted, r.dirs.map((d) => d.usable)])); });`;
-  const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', timeout: 8000 });
+  const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', timeout: 60000 });
   assert.equal(r.error, undefined, 'timed out: a key file was opened');
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), [[['k1', { pid: 31, start: START }]], [], [true]]);

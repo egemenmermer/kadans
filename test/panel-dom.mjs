@@ -130,7 +130,9 @@ export class FNode {
 
 // opts.clock: { now } read by Date.now() in the page; opts.timers: an array that collects setTimeout callbacks to run by hand
 // (k18: each entry gets an id, and clearTimeout marks it `cleared`; nothing is deleted, so tests that fire by ms still work).
-// opts.media: { reduce } read by matchMedia('(prefers-reduced-motion: reduce)'), changeable mid-test.
+// opts.media: { reduce } read by matchMedia('(prefers-reduced-motion: reduce)'), changeable mid-test. Without opts.media and
+// without opts.clock (real time) motion is off: the page's motionOk() turns on 300 ms after the first paint, so on a loaded
+// machine a slow test would see enter / sheet classes ('up', 'in') that a fast one never does.
 export function loadPanel(opts = {}) {
   const sent = [];
   const log = [];
@@ -165,7 +167,7 @@ export function loadPanel(opts = {}) {
   let tid = 0;
   const g = { document, console, setTimeout: timers ? (fn, ms) => { timers.push({ id: ++tid, fn, ms }); return tid; } : () => 0,
     clearTimeout: timers ? (id) => { const t = timers.find((x) => x.id === id); if (t) t.cleared = true; } : noop,
-    matchMedia: (q) => ({ matches: (/reduce/.test(q) && opts.media?.reduce === true) || q === `(display-mode: ${opts.http?.displayMode ?? 'browser'})` }), CSS: { escape: String },
+    matchMedia: (q) => ({ matches: (/reduce/.test(q) && (opts.media ? opts.media.reduce === true : !opts.clock)) || q === `(display-mode: ${opts.http?.displayMode ?? 'browser'})` }), CSS: { escape: String },
     webkit: { messageHandlers: { kadans: { postMessage: (m) => sent.push(m) } } } };
   // k29 opts.http.standalone: navigator.standalone (iOS: false in Safari, true in a home-screen app; elsewhere unset);
   // opts.http.displayMode: what (display-mode: …) matches ('browser' by default).
@@ -232,3 +234,32 @@ export function fakeServer(routes) {
   return { calls, fetch, routes };
 }
 export const fixture = (p, name) => { const f = { ...p.window.KADANS_FIXTURES[name] }; delete f.after; return JSON.parse(JSON.stringify(f)); };
+
+// polish-2: everything a row offers: its own buttons (primary and More) plus the More menu's items. Opens the menu,
+// reads it and closes it again, so the panel is left as it was. Markup only (data-do / data-id / aria-label as drawn).
+export function rowActs(p, id) {
+  const acts = (html) => {
+    const i = html.indexOf(`data-key="row:${id}"`);
+    if (i < 0) return '';
+    const a = html.indexOf('<div class="acts', i);
+    return a < 0 ? '' : html.slice(a, html.indexOf('</div>', a) + 6);
+  };
+  const before = acts(p.html());
+  if (!before.includes('data-do="more"')) return before;
+  p.tap({ do: 'more', id });
+  const html = p.html();
+  const m = html.indexOf(`data-key="menu:more:${id}"`);
+  let menu = '';
+  if (m >= 0) {
+    const rest = html.slice(m + 1);
+    const next = rest.search(/data-key="(?!more:)/);
+    menu = html.slice(m, next < 0 ? undefined : m + 1 + next);
+  }
+  p.tap({ do: 'more', id });
+  return before + menu;
+}
+// Every row's actions on the panel, menus included (see rowActs).
+export function allActs(p) {
+  const ids = [...p.html().matchAll(/data-key="row:([^"]+)"/g)].map((m) => m[1].replace(/&(amp|lt|gt|quot|#39);/g, (e) => UNESC[e]));
+  return ids.map((id) => rowActs(p, id)).join('\n');
+}

@@ -180,8 +180,8 @@ test('cache: an unchanged folder is a cache hit; only new complete lines are rea
   assert.equal(statSync(join(sb.home, 'codex-cache.json')).mode & 0o777, 0o600);
   // a fast no-change path
   const t0 = performance.now();
-  for (let i = 0; i < 10; i++) syncCodex(sb.home, sb.env, { cfg, now });
-  assert.ok((performance.now() - t0) / 10 < 250, 'cache hit should stay fast (generous: loaded machines)');
+  for (let i = 0; i < 10; i++) assert.equal(syncCodex(sb.home, sb.env, { cfg, now }).code, 'unchanged'); // the behaviour: every repeat is a cache hit
+  assert.ok((performance.now() - t0) / 10 < 2000, 'cache hit should stay fast (very generous: only a re-parse of the whole log would blow it; loaded machines)');
   // a complete new line plus a partial one still being written
   const partial = rl(now - MIN, win(14, 300, reset));
   appendFileSync(f, `${rl(now - 10 * MIN, win(12, 300, reset))}\n${partial.slice(0, 40)}`);

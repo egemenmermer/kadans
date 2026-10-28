@@ -216,6 +216,32 @@ html[data-chrome="shadow"] .panel { box-shadow: var(--shadow-panel); }
 .pick button { display: flex; flex-direction: column; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; min-width: 0; }
 @media (hover: hover) { .pick button:hover { background: var(--hover); } }
 .pick .nm, .pick .pv { display: block; max-width: 100%; }
+/* polish-2: the row's More menu. A small menu at the row's end (it pops from the More button), one action per line with
+   its icon; a greyed action keeps its reason as a second line. Stop or Close sits last, under a hairline. */
+.pick.more { width: max-content; min-width: 184px; max-width: calc(100% - 56px); margin: 2px 8px 6px auto; }
+.pick.more.flip { margin: 6px 8px 2px auto; }
+.pick.more.flip.enter { transform-origin: bottom right; }
+.pick.more button { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 9px; align-items: center; }
+.pick.more .mi { grid-row: 1 / span 2; display: grid; place-items: center; color: var(--label2); }
+.pick.more .mi svg { width: 13px; height: 13px; }
+.pick.more .nm { font-weight: 400; }
+.pick.more .pv { grid-column: 2; font-size: 11px; white-space: normal; }
+.pick.more button[aria-disabled="true"] { cursor: default; }
+.pick.more button[aria-disabled="true"] .nm, .pick.more button[aria-disabled="true"] .mi { color: var(--label3); }
+@media (hover: hover) { .pick.more button[aria-disabled="true"]:hover { background: none; } }
+.pick.more button:focus-visible { background: var(--hover); outline: none; }
+.pick.more .sep { height: .5px; margin: 4px 8px; background: var(--line); }
+/* On the phone: an action sheet over the list, the chat's name on top, 44 px rows, Cancel apart at the bottom. */
+.pick.more.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; width: auto; max-width: none; margin: 0;
+  padding: 10px 8px max(10px, env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0;
+  box-shadow: 0 -.5px 0 var(--line), 0 -10px 30px rgba(20,20,40,.12); }
+.pick.more.sheet .pick-h { padding: 4px 12px 8px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick.more.sheet .mcancel { display: block; width: 100%; min-height: 44px; margin-top: 6px; border-radius: 12px; background: var(--pill);
+  font-weight: 500; text-align: center; }
+.pick.more.sheet.up { animation: sheet-in .3s cubic-bezier(.32,.72,0,1) backwards; }
+html[data-shell="phone"] .pick.more button:not(.mcancel) { column-gap: 12px; grid-template-columns: 18px minmax(0, 1fr); }
+html[data-shell="phone"] .pick.more .mi svg { width: 16px; height: 16px; }
+html[data-shell="phone"] .pick.more .pv { font-size: 12px; }
 /* "N idle" group row: the toggle fills the row; Close all (or its confirm) sits at the end. */
 /* k38: another computer's group header: quiet, like the section heading; "offline" muted */
 .mh { padding: 8px 8px 2px; font-size: 12px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -482,6 +508,17 @@ html[data-shell="phone"] .tbar .pill { min-height: 38px; padding: 8px 16px; font
 /* The inline card rises in like a new row (.enter); the sheet slides up (.up, added only when motion is on). */
 .tell.sheet.up { animation: sheet-in .3s cubic-bezier(.32,.72,0,1) backwards; }
 @keyframes sheet-in { from { transform: translateY(100%); } }
+
+/* k54: Continue on kasa. Step 1 and step 2 reuse the Tell card: inline under the row on the Mac, the bottom sheet on the
+   phone. One calm line, then Cancel and the one action; repo choices (when Kadans could not match one) wrap as quiet pills. */
+.ho .hol { margin: 0 2px; font-size: 12.5px; line-height: 17px; color: var(--label); overflow-wrap: anywhere; }
+.ho .hol .code { font-size: 11.5px; }
+.ho .hoc { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ho .hoc .pill { background: var(--panel); box-shadow: 0 0 0 .5px var(--line); } /* a choice, not a line of text (both themes) */
+html[data-shell="phone"] .ho .hol { font-size: 15px; line-height: 21px; }
+html[data-shell="phone"] .ho .hol .code { font-size: 13.5px; }
+html[data-shell="phone"] .ho .hoc { gap: 8px; margin-top: 10px; }
+html[data-shell="phone"] .ho .hoc .pill { min-height: 38px; padding: 8px 14px; font-size: 14px; }
 
 /* k52: Inbox. One tray in the bottom bar (a count only when something needs you), then a pushed screen like Settings. */
 .ic.ibx { position: relative; }

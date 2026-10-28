@@ -26,7 +26,7 @@ function sandbox() {
 }
 
 function run(sb, args, bin = BIN) {
-  const r = spawnSync(process.execPath, [bin, ...args], { env: sb.env, encoding: 'utf8', timeout: 30000, input: '' });
+  const r = spawnSync(process.execPath, [bin, ...args], { env: sb.env, encoding: 'utf8', timeout: 60_000, input: '' });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 

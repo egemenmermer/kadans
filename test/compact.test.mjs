@@ -313,7 +313,7 @@ function cliSandbox({ state = 'done', tail = EMPTY } = {}) {
 }
 
 const cli = (env, args) => {
-  const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 60_000 });
   return { code: r.status, out: r.stdout, err: r.stderr };
 };
 const reads = (log) => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((l) => l.startsWith('terminal read')) : []);
@@ -446,6 +446,10 @@ const MSG = 'SECRET-MSG ship the fix once the tests pass';
 
 test('k48 send: messageText keeps 1 to 4000 printable characters plus newlines; refuses control, bidi, separators and a leading "-"', () => {
   for (const t of ['!rm -rf ~', '  !ls', '/clear', '/compact', '#remember this', '-x']) assert.equal(messageText(t), null, t);
+  // rev-2 L8: "!" at the start of any line (shell mode if a host submits a raw newline), not just the first
+  for (const t of ['hello\n!rm -rf ~', 'hello\n\n  !ls', 'a\r\n!b']) assert.equal(messageText(t), null, t);
+  assert.equal(messageText('wow!\nnice! really'), 'wow!\nnice! really');
+  assert.equal(messageText('line one\n/tmp is fine\n#3 too'), 'line one\n/tmp is fine\n#3 too');
   assert.equal(messageText('be careful with /tmp and #3!'), 'be careful with /tmp and #3!');
   assert.equal(messageText('  hello\r\nworld\r\n'), 'hello\nworld');
   assert.equal(messageText('ünïcödé 🚀\n\nnext'), 'ünïcödé 🚀\n\nnext');
@@ -491,7 +495,7 @@ test('k48 send: types the message plus Enter only after the draft guard; refusal
 test('k48 cli: agent send takes the text on stdin only, types it once, never echoes it; bad text, an argument or a draft send nothing', () => {
   const sb = cliSandbox();
   const send = (args, input, env = sb.env) => {
-    const r = spawnSync(process.execPath, [BIN, 'agent', 'send', ...args], { env, encoding: 'utf8', input, timeout: 15000 });
+    const r = spawnSync(process.execPath, [BIN, 'agent', 'send', ...args], { env, encoding: 'utf8', input, timeout: 60_000 });
     return { code: r.status, out: r.stdout, err: r.stderr };
   };
   const dry = send(['s1', '--dry-run'], MSG);

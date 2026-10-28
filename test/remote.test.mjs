@@ -122,13 +122,13 @@ test('remote: an error marks the machine offline at once (one marker row); a lat
 
 test('remote: a slow orca is cut at the timeout (real spawn), counted as a timeout', () => withHome(async (home) => {
   const slow = join(home, 'orca');
-  writeFileSync(slow, `#!/bin/sh\ncase "$1" in environment) echo '${ENVS}';; *) sleep 20;; esac\n`, { mode: 0o755 });
+  writeFileSync(slow, `#!/bin/sh\ncase "$1" in environment) echo '${ENVS}';; *) exec sleep 60;; esac\n`, { mode: 0o755 });
   const { remoteCaller, setEnvList } = await import('../lib/remote.mjs');
   setEnvList(home, [{ id: 'env-1', name: 'other' }], NOW); // only the ps is timed (a loaded machine could slow the env list too)
   const call = remoteCaller({ PATH: process.env.PATH, KADANS_ORCA_BIN: slow });
   const t0 = Date.now();
   const rows = await readRemote(home, { call, now: NOW, timeout: 200 });
-  assert.ok(Date.now() - t0 < 15_000); // cut at the timeout, not after the 20 s sleep
+  assert.ok(Date.now() - t0 < 45_000); // cut at the timeout (200 ms), not after the 60 s sleep
   assert.deepEqual(rows.map((r) => [r.id, r.machineOffline]), [['remote:other', true]]); // never answered: offline
   assert.equal(remoteCaller({ KADANS_ORCA: '0' }), null);
 }));
@@ -359,7 +359,7 @@ test('k48 cli: agents --json returns at once and a detached refresh fills the ca
       `  "terminal send --environment"|"terminal close --environment") echo '{"ok":true}' ;;\n  *) echo '{"ok":true}' ;;\nesac\n`, { mode: 0o755 });
     const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
     const cli = (args, input) => {
-      const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', input, timeout: 15000 });
+      const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', input, timeout: 60_000 });
       return { code: r.status, out: r.stdout, err: r.stderr };
     };
     const first = cli(['agents', '--json']);
@@ -385,3 +385,26 @@ test('k48 cli: agents --json returns at once and a detached refresh fills the ca
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('fix-7 L1: a flag-shaped env id from the environment list never reaches worktree ps', () => withHome(async (home) => {
+  const envs = JSON.stringify({ ok: true, result: { environments: [{ id: '--help', name: 'kasa' }, { id: 'env-1', name: 'other' }] } });
+  const call = caller({ env: okText(envs), ps: okText(ps('waiting')) });
+  await refreshRemote(home, { call, now: NOW });
+  const psCalls = call.calls.filter((c) => c.startsWith('worktree ps'));
+  assert.deepEqual(psCalls, ['worktree ps --environment env-1 --json']);
+  assert.ok(!call.calls.some((c) => c.includes('--help')));
+}));
+
+test('fix-7 L6: stop, compact and send refuse a production-looking computer before any call', () => withHome(async (home) => {
+  const { remoteCompact, remoteSend, remoteStop } = await import('../lib/remote.mjs');
+  const prodEnvs = JSON.stringify({ ok: true, result: { environments: [{ id: 'env-1', name: 'web-prod' }, { id: 'env-prod', name: 'ok-box' }] } });
+  const seed = caller({ env: okText(prodEnvs), ps: okText(ps('done')), list: okText(TL) });
+  await refreshRemote(home, { call: seed, now: NOW });
+  for (const id of ['remote:web-prod:tab-1:1', 'remote:ok-box:tab-1:1']) {
+    const call = actionCaller();
+    for (const r of [await remoteStop(home, id, { call }), await remoteCompact(home, id, { call }), await remoteSend(home, id, MSG, { call })]) {
+      assert.deepEqual([r.ok, r.why], [false, 'refused: Kadans never types into a production host'], id);
+    }
+    assert.deepEqual(call.calls, [], `${id}: nothing reached orca`);
+  }
+}));

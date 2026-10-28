@@ -28,17 +28,17 @@
   K.KADANS_FIXTURES.compact = { status, agents, config };
   // "Compact this chat?" + the why sentence, Compact / Cancel.
   K.KADANS_FIXTURES.compact_confirm = { status, agents, config,
-    after: (doc) => doc.querySelector('[data-do="compact"][data-id="fx-0021"]')?.click() };
+    after: (doc) => KF.act(doc, 'compact', 'fx-0021') };
   // Confirmed: "Compacting…" on the row, no Compact anywhere else until it settles.
   K.KADANS_FIXTURES.compact_sent = { status, agents, config,
     after: (doc) => {
-      doc.querySelector('[data-do="compact"][data-id="fx-0021"]')?.click();
+      KF.act(doc, 'compact', 'fx-0021');
       doc.querySelector('[data-do="compact-go"][data-id="fx-0021"]')?.click();
     } };
   // k12: the CLI refused the click: its reason replaces the row's meta line for 8 s. A stop refused the same way looks alike.
   K.KADANS_FIXTURES.compact_refused = { status, agents, config,
     after: (doc) => {
-      doc.querySelector('[data-do="compact"][data-id="fx-0021"]')?.click();
+      KF.act(doc, 'compact', 'fx-0021');
       doc.querySelector('[data-do="compact-go"][data-id="fx-0021"]')?.click();
       K.kadans.result({ action: 'compact', id: 'fx-0021', ok: false, why: 'not compacted: That chat has unsent text: type /compact there yourself' });
     } };

@@ -197,11 +197,11 @@ test('listAgents: orca missing or slow falls back to the hook rules; orcaFetch g
   assert.deepEqual([row(listAgents(home, { now: NOW, run: () => { throw new Error('orca timed out'); }, alive: () => true })).status, row(listAgents(home, { now: NOW, run: null, alive: () => true })).stateSource], ['working', 'hooks']);
   // a slow orca binary in the async path
   const slow = join(tmp(), 'slow-orca.sh');
-  writeFileSync(slow, '#!/bin/sh\nsleep 10\necho "{}"\n');
+  writeFileSync(slow, '#!/bin/sh\nexec sleep 60\n'); // exec: killing the cut-off child kills the sleep itself
   chmodSync(slow, 0o755);
   const t0 = Date.now();
   assert.equal(await orcaFetch({ PATH: process.env.PATH, KADANS_ORCA_BIN: slow }, 150), null);
-  assert.ok(Date.now() - t0 < 8000, 'gave up at the timeout, not after the sleep');
+  assert.ok(Date.now() - t0 < 45_000, 'gave up at the timeout, not after the 60 s sleep'); // 150 ms timeout; the bound only has to stay below the sleep
   const list = await listAgentsAsync(home, { env: { PATH: process.env.PATH, KADANS_ORCA_BIN: slow }, timeout: 150, now: NOW, alive: () => true, claudeDirs: [] });
   assert.deepEqual([row(list).status, row(list).stateSource], ['working', 'hooks']);
   assert.equal(await orcaFetch({ PATH: process.env.PATH, KADANS_ORCA: '0' }), null);
@@ -211,7 +211,7 @@ test('listAgents: orca missing or slow falls back to the hook rules; orcaFetch g
   const ps = { ok: true, result: { worktrees: [{ path: proj, repo: 'repo', displayName: 'main', agents: [{ paneKey: 't1:l1', state: 'waiting', agentType: 'claude', stateStartedAt: NOW - MIN, updatedAt: NOW }] }] } };
   writeFileSync(fast, `#!/bin/sh\ncase "$1 $2" in\n  "worktree ps") echo '${JSON.stringify(ps)}' ;;\n  *) exit 3 ;;\nesac\n`);
   chmodSync(fast, 0o755);
-  const synced = await listAgentsAsync(home, { env: { PATH: process.env.PATH, KADANS_ORCA_BIN: fast }, now: NOW, alive: () => true, hosted: hosted('w', 't1:l1', 'term_0') });
+  const synced = await listAgentsAsync(home, { env: { PATH: process.env.PATH, KADANS_ORCA_BIN: fast }, timeout: 30_000, now: NOW, alive: () => true, hosted: hosted('w', 't1:l1', 'term_0') });
   assert.deepEqual([row(synced).status, row(synced).stateSource, row(synced).stateSince], ['needs-you', 'orca', NOW - MIN]);
 });
 
@@ -303,8 +303,8 @@ test('cli: agents --brief --json prints exactly {working, needsYou, t}; a fresh 
   const fake = join(root, 'fake-orca.sh');
   writeFileSync(fake, `#!/bin/sh\necho "$*" >> "${log}"\ncase "$1 $2" in\n  "worktree ps") echo '${JSON.stringify(ps)}' ;;\n  "terminal list") echo '{"ok":true,"result":{"terminals":[{"handle":"term_A","tabId":"t1","leafId":"l1","title":"Tune the gauge","preview":"secret"}]}}' ;;\n  *) exit 3 ;;\nesac\n`);
   chmodSync(fake, 0o755);
-  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000' };
-  const cli = (args) => spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 15000 });
+  const env = { PATH: process.env.PATH, HOME: root, KADANS_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'), KADANS_ORCA_BIN: fake, KADANS_ORCA_TIMEOUT_MS: '30000', KADANS_BRIEF_FRESH_MS: '600000' };
+  const cli = (args) => spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 60_000 });
   const r = cli(['agents', '--brief', '--json']);
   assert.equal(r.status, 0, r.stderr);
   const b = JSON.parse(r.stdout);

@@ -41,13 +41,13 @@
         context: { tokens: 130000, window: 200000, pct: 65, advice: 'now', why: `${BREAK}${SCRIPT}` } }),
     ],
     // the Replace picker open on the first row: task text and project names go through the menu markup too
-    after: (doc) => doc.querySelector('[data-do="replace"][data-id="fx-0201"]')?.click(),
+    after: (doc) => KF.act(doc, 'replace', 'fx-0201'),
   };
   // k12: a refused compact whose reason is hostile text (quote, backslash, tags, a newline) goes through the result callback.
   K.KADANS_FIXTURES.hostile_result = {
     ...K.KADANS_FIXTURES.hostile,
     after: (doc) => {
-      doc.querySelector('[data-do="compact"][data-id="fx-0204"]')?.click();
+      KF.act(doc, 'compact', 'fx-0204');
       doc.querySelector('[data-do="compact-go"][data-id="fx-0204"]')?.click();
       K.kadans.result({ action: 'compact', id: 'fx-0204', ok: false, why: `${IMG} ${QUOTE} \\ ${SCRIPT}\n${BREAK}` });
     },

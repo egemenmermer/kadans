@@ -32,7 +32,7 @@
   };
   // The Replace picker open on the first row (snapshot only: `after` runs once the fixture is rendered).
   K.KADANS_FIXTURES.replace = Object.assign({}, K.KADANS_FIXTURES.many, {
-    after: (doc) => doc.querySelector('[data-do="replace"][data-id="fx-0001"]')?.click(),
+    after: (doc) => KF.act(doc, 'replace', 'fx-0001'),
   });
   // k6: the pace menu open on a working row, with a slowed and a paused agent above it, Auto-pace on.
   K.KADANS_FIXTURES.pace = Object.assign({}, K.KADANS_FIXTURES.many, {
@@ -44,7 +44,7 @@
         pace: { mode: 'paused', until: N + 50 * M } }),
       ...KF.base().filter((a) => a.id === 'fx-0003'),
     ],
-    after: (doc) => doc.querySelector('[data-do="pace"][data-id="fx-0003"]')?.click(),
+    after: (doc) => KF.act(doc, 'pace', 'fx-0003'),
   });
   // An open "2 idle" group.
   K.KADANS_FIXTURES.idle_open = Object.assign({}, K.KADANS_FIXTURES.many, {

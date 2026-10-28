@@ -23,5 +23,5 @@
   // "Close 2 idle chats?" open on the group.
   K.KADANS_FIXTURES.blobs_closeall = { status, agents, after: (doc) => doc.querySelector('[data-do="close-all"]')?.click() };
   // "Close this chat?" open on the idle row (under 2 h).
-  K.KADANS_FIXTURES.blobs_close = { status, agents, after: (doc) => doc.querySelector('[data-do="close"][data-id="fx-0006"]')?.click() };
+  K.KADANS_FIXTURES.blobs_close = { status, agents, after: (doc) => KF.act(doc, 'close', 'fx-0006') };
 })(window);
